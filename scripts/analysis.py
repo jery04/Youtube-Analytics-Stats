@@ -171,7 +171,7 @@ def plot_definicion_pie(df=None, csv_path=None, root=None, output_dir=None, file
 			# Preparar sufijo y nombres de salida
 			suffix = f"_{name}{suffix_base}"
 			out_file = script_dir / f"definicion_pie{suffix}.png"
-			txt_file = script_dir / f"definicion_counts{suffix}.txt"
+			txt_file = out_file.with_suffix('.txt')
 
 			plt.figure(figsize=(8,8))
 			wedges, texts, autotexts = plt.pie(
@@ -214,7 +214,7 @@ def plot_definicion_pie(df=None, csv_path=None, root=None, output_dir=None, file
 			colors = ['#cccccc']
 			suffix = f"_{name}{suffix_base}"
 			out_file = script_dir / f"definicion_pie{suffix}.png"
-			txt_file = script_dir / f"definicion_counts{suffix}.txt"
+			txt_file = out_file.with_suffix('.txt')
 			plt.figure(figsize=(8,8))
 			wedges, texts, autotexts = plt.pie(sizes, labels=None, autopct=lambda p: '', colors=colors, startangle=90, wedgeprops={'linewidth': 0.5, 'edgecolor': 'white'})
 			for t in autotexts:
@@ -246,7 +246,7 @@ def plot_definicion_pie(df=None, csv_path=None, root=None, output_dir=None, file
 			colors = ['#cccccc']
 			suffix = f"_{name}{suffix_base}"
 			out_file = script_dir / f"definicion_pie{suffix}.png"
-			txt_file = script_dir / f"definicion_counts{suffix}.txt"
+			txt_file = out_file.with_suffix('.txt')
 			plt.figure(figsize=(8,8))
 			wedges, texts, autotexts = plt.pie(sizes, labels=None, autopct=lambda p: '', colors=colors, startangle=90, wedgeprops={'linewidth': 0.5, 'edgecolor': 'white'})
 			for t in autotexts:
@@ -299,7 +299,7 @@ def plot_definicion_pie(df=None, csv_path=None, root=None, output_dir=None, file
 		plt.tight_layout()
 
 		out_file = script_dir / f"definicion_pie{suffix}.png"
-		txt_file = script_dir / f"definicion_counts{suffix}.txt"
+		txt_file = out_file.with_suffix('.txt')
 		if save:
 			plt.savefig(out_file, dpi=150)
 			print(f"Gráfico de definición guardado en {out_file}")
@@ -476,17 +476,16 @@ def analyze_yearly_percentage(df, root=None, output_dir=None, file_suffix=None):
 		root = Path(__file__).resolve().parents[1]
 	outputs_root = root / "outputs"
 	outputs_root.mkdir(parents=True, exist_ok=True)
-	# Guardar todo en outputs/EDA por defecto (misma carpeta para EDA)
-	if output_dir is None:
-		script_dir = outputs_root 
-	else:
-		script_dir = Path(output_dir)
-	# Asegurar que exista la carpeta destino
+	# Usar carpeta EDA por defecto
+	script_dir = outputs_root / "EDA"
 	script_dir.mkdir(parents=True, exist_ok=True)
+	if output_dir is not None:
+		script_dir = Path(output_dir)
+		script_dir.mkdir(parents=True, exist_ok=True)
 
 	df = df.copy()
 
-	# Buscar columna de fecha/hora común (incluye nombres en español)
+	# Buscar columna de fecha/hora (mismo heurístico que otras funciones)
 	fallback_cols = [
 		"publish_time",
 		"publish_date",
@@ -505,71 +504,70 @@ def analyze_yearly_percentage(df, root=None, output_dir=None, file_suffix=None):
 			found = c
 			break
 	if not found:
-		# Buscar por patrones más generales (incluye español)
 		for c in df.columns:
 			if re.search(r'publish|upload|date|time|fecha|publica|publicación|publicacion', c, re.I):
 				found = c
 				break
 	if not found:
-		print("No se encontró una columna de fecha/hora para el análisis anual.")
-		return
+		print("No se encontró una columna de fecha/hora para el análisis por año.")
+		return None
 
-	# Parsear fechas
+	# Parsear fechas (format='mixed' soporta formatos mixtos como
+	# '2026-02-28 06:05:00+00:00' y '2026-02-28T08:43:31Z' en la misma columna)
 	try:
-		df[found] = pd.to_datetime(df[found], errors='coerce')
+		df[found] = pd.to_datetime(df[found], format='mixed', errors='coerce')
 	except Exception:
-		df[found] = pd.to_datetime(df[found].astype(str), errors='coerce')
+		df[found] = pd.to_datetime(df[found].astype(str), format='mixed', errors='coerce')
 
 	df = df.dropna(subset=[found])
 	if df.empty:
-		print("No hay datos válidos con fechas para el análisis anual.")
-		return
+		print("No hay datos válidos con fechas para el análisis por año.")
+		return None
 
-	# Extraer año
+	# Extraer año y contar
 	df['__year'] = df[found].dt.year
 	counts = df['__year'].value_counts().sort_index()
 	total = int(counts.sum())
 	if total == 0:
-		print("No hay filas con año válido para el análisis anual.")
-		return
+		print("No hay filas para contar por año.")
+		return None
 
-	perc = (counts / total * 100).round(2)
-
-	# Preparar sufijo seguro
-	suffix = f"_{re.sub(r'\\W+', '_', str(file_suffix)).strip('_')}" if file_suffix else ""
-
-	# Gráfico
-	plt.figure(figsize=(10,6))
-	sns.barplot(x=[str(y) for y in counts.index], y=perc.values, palette='viridis')
+	# Gráfico de barras
+	plt.figure(figsize=(10, 5))
+	ax = sns.barplot(x=counts.index.astype(str), y=counts.values, palette='viridis')
 	plt.xlabel('Año')
-	plt.ylabel('% del total')
-	plt.title('Porcentaje de filas del dataset por año')
+	plt.ylabel('Cantidad de videos')
+	title = 'Cantidad de videos por año'
+	plt.title(title)
 
-	# Ajustar límite superior para dejar espacio a las anotaciones
-	ymax = float(perc.values.max()) if len(perc.values) > 0 else 0.0
-	plt.ylim(0, ymax * 1.2 + 2)
+	# Anotar porcentaje encima de cada barra
+	for p in ax.patches:
+		height = p.get_height()
+		if total > 0:
+			percent = height / total * 100
+			ax.annotate(f"{percent:.1f}%", (p.get_x() + p.get_width() / 2, height),
+					ha='center', va='bottom', fontsize=9, xytext=(0, 3), textcoords='offset points')
 
-	# Anotar cada barra con porcentaje y conteo real
-	for i, year in enumerate(counts.index):
-		v = float(perc.loc[year])
-		cnt = int(counts.loc[year])
-		offset = ymax * 0.02 if ymax > 0 else 0.5
-		plt.text(i, v + offset, f"{v:.2f}% ({cnt})", ha='center')
 	plt.tight_layout()
 
-	out_file = script_dir / f"yearly_percentage{suffix}.png"
-	plt.savefig(out_file)
-	print(f"Gráfico anual guardado en {out_file}")
+	suffix = f"_{re.sub(r'\\W+', '_', str(file_suffix)).strip('_')}" if file_suffix else ""
+	out_file = script_dir / f"yearly_histogram{suffix}.png"
+	plt.savefig(out_file, dpi=150)
+	print(f"Histograma anual guardado en {out_file}")
 
-	# Guardar txt
-	txt_file = script_dir / f"yearly_percentage{suffix}.txt"
+	# Guardar TXT con Year, Count, Percent
+	txt_file = script_dir / f"yearly_histogram{suffix}.txt"
 	with open(txt_file, 'w', encoding='utf-8') as f:
 		f.write('Year,Count,Percent\n')
 		for year, cnt in counts.items():
-			p = perc.loc[year]
-			f.write(f"{int(year)},{int(cnt)},{p:.2f}\n")
-	print(f"Conteos anuales guardados en {txt_file}")
+			f.write(f"{int(year)},{int(cnt)},{cnt/total*100:.2f}\n")
+	print(f"Conteos por año guardados en {txt_file}")
+
 	plt.close()
+
+	# Devolver Series con conteos (índice numérico de año)
+	ser = pd.Series(data=counts.values, index=counts.index.astype(int))
+	return ser
 
 # Conteo de videos por día de la semana (Lun-Dom)
 def analyze_weekday_distribution(df, root=None, output_dir=None, file_suffix=None, canal_filter=None, duracion_filter=None):
@@ -800,11 +798,12 @@ def analyze_weekday_distribution(df, root=None, output_dir=None, file_suffix=Non
 		print("No se encontró una columna de fecha/hora para el análisis por día de la semana.")
 		return None
 
-	# Parsear fechas
+	# Parsear fechas (format='mixed' soporta formatos mixtos como
+	# '2026-02-28 06:05:00+00:00' y '2026-02-28T08:43:31Z' en la misma columna)
 	try:
-		df[found] = pd.to_datetime(df[found], errors='coerce')
+		df[found] = pd.to_datetime(df[found], format='mixed', errors='coerce')
 	except Exception:
-		df[found] = pd.to_datetime(df[found].astype(str), errors='coerce')
+		df[found] = pd.to_datetime(df[found].astype(str), format='mixed', errors='coerce')
 
 	df = df.dropna(subset=[found])
 	if df.empty:
@@ -2234,11 +2233,12 @@ def analyze_publications_2h_intervals(df, root=None, output_dir=None, file_suffi
 		print("No se encontró una columna de fecha/hora para el análisis de intervalos de 2h.")
 		return None
 
-	# Parsear fechas
+	# Parsear fechas (format='mixed' soporta formatos mixtos como
+	# '2026-02-28 06:05:00+00:00' y '2026-02-28T08:43:31Z' en la misma columna)
 	try:
-		df[found] = pd.to_datetime(df[found], errors='coerce')
+		df[found] = pd.to_datetime(df[found], format='mixed', errors='coerce')
 	except Exception:
-		df[found] = pd.to_datetime(df[found].astype(str), errors='coerce')
+		df[found] = pd.to_datetime(df[found].astype(str), format='mixed', errors='coerce')
 
 	df = df.dropna(subset=[found])
 	if df.empty:
@@ -2563,9 +2563,6 @@ def main() -> None:
  
 	# Conteo de publicaciones por intervalos de 2 horas, con análisis separado por día de la semana
 	analyze_publications_2h_intervals(df, output_dir=analisis_dia_dir, por_dia=True)
-
-
-
 
 if __name__ == '__main__':
 	main()
