@@ -76,6 +76,8 @@ FIELDNAMES = [
 YEAR_START = "2024-01-01T00:00:00Z"
 YEAR_END = "2026-12-31T23:59:59Z"
 
+# Prioridad explícita de años (procesar en este orden)
+YEARS_PRIORITY = ["2026", "2025", "2024"]
 
 # ── Utilidades ───────────────────────────────────────────────────────────────
 def parse_duration(iso):
@@ -470,22 +472,23 @@ class Pipeline:
         if self.verbose:
             print("Verbose mode: detailed pipeline logging enabled")
 
-        # ── Fase 1: Capturar videos NUEVOS (desde última ejecución) ──────
-        if self.state.get("newest"):
-            print(f"\n► Fase 1 – Nuevos videos (desde {self.state['newest'][:10]})")
-            p, exc = self._crawl("catchup",
-                                 published_after=self.state["newest"])
+        # Priorizar búsquedas por año según YEARS_PRIORITY
+        for y in YEARS_PRIORITY:
+            if not self._can_page():
+                break
+            pa = f"{y}-01-01T00:00:00Z"
+            pb = f"{y}-12-31T23:59:59Z"
+            print(f"\n► Prioridad año – {y} ({pa[:10]} → {pb[:10]})")
+            p, exc = self._crawl("year", published_after=pa, published_before=pb)
             total_pages += p
             if exc:
                 self._finish(total_pages)
                 return
 
-        # ── Fase 2: Exploración histórica (hacia atrás en el tiempo) ─────
+        # Si queda cuota, permitir una pasada general (retrocompatible)
         if self._can_page():
-            pb = self.state.get("oldest")
-            label = f" (antes de {pb[:10]})" if pb else ""
-            print(f"\n► Fase 2 – Exploración histórica{label}")
-            p, _ = self._crawl("explore", published_before=pb)
+            print("\n► Exploración adicional (sin límite anual)")
+            p, _ = self._crawl("explore")
             total_pages += p
 
         self._finish(total_pages)
