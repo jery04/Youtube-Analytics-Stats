@@ -1723,7 +1723,7 @@ def analyze_most_frequent_tags(df, root=None, output_dir=None, file_suffix=None,
 		root = Path(__file__).resolve().parents[1]
 	outputs_root = root / "outputs"
 	outputs_root.mkdir(parents=True, exist_ok=True)
-	script_dir = outputs_root / Path(__file__).stem
+	script_dir = outputs_root / "Tags"
 	script_dir.mkdir(parents=True, exist_ok=True)
 	if output_dir is not None:
 		script_dir = Path(output_dir)
@@ -2038,6 +2038,458 @@ def analyze_most_frequent_tags(df, root=None, output_dir=None, file_suffix=None,
 		return list(results.values())[0]
 	return results
 
+# Conteo de publicaciones por intervalos de 2 horas
+def analyze_publications_2h_intervals(df, root=None, output_dir=None, file_suffix=None, tiempo=2, canal_filter=None, duracion_filter=None, por_dia=False):
+	"""
+	Cuenta cuántos videos se publicaron en intervalos de `tiempo` horas
+	(donde `tiempo` puede ser 0.5, 1 o 2) y guarda un histograma PNG y un TXT
+	en `outputs/<script>/`.
+
+	Args:
+		df: DataFrame con los datos
+		root, output_dir, file_suffix: como en otras funciones
+		tiempo: tamaño del intervalo en horas. Valores permitidos: 0.5, 1, 2
+		canal_filter: Nombre del canal para filtrar (columna "canal").
+			Si es None no se filtra por canal.
+		duracion_filter: Tupla (min_seg, max_seg) para filtrar por duración
+			(columna "duracion_iso"). Cualquiera de los dos valores puede ser
+			None para indicar sin límite.
+			Ejemplos:
+				(None, 60)    → videos de menos de 1 minuto
+				(3600, None)  → videos de más de 1 hora
+				(60, 3600)    → videos entre 1 min y 1 hora
+			Si es None no se filtra por duración.
+		por_dia: Si es True, crea una subcarpeta y genera un análisis
+			separado para cada día de la semana (lunes a domingo),
+			respetando los filtros de canal y duración.
+	"""
+
+	# Validar parametro tiempo
+	if float(tiempo) not in {0.5, 1.0, 2.0}:
+		print("Parámetro 'tiempo' inválido. Use 0.5, 1 o 2 (horas).")
+		return None
+
+	bin_size = float(tiempo)
+
+	if root is None:
+		root = Path(__file__).resolve().parents[1]
+	outputs_root = root / "outputs"
+	outputs_root.mkdir(parents=True, exist_ok=True)
+	script_dir = outputs_root / "Análisis del día"
+	script_dir.mkdir(parents=True, exist_ok=True)
+	if output_dir is not None:
+		script_dir = Path(output_dir)
+		script_dir.mkdir(parents=True, exist_ok=True)
+
+	df = df.copy()
+
+	# ------------------------------------------------------------------
+	# Función interna para parsear duraciones a segundos
+	# ------------------------------------------------------------------
+	def _to_seconds(x):
+		if pd.isna(x):
+			return None
+		if isinstance(x, (int, float)) and not isinstance(x, bool):
+			try:
+				val = float(x)
+				return int(val / 1000) if val > 1e6 else int(val)
+			except Exception:
+				return None
+		s = str(x).strip()
+		m_iso = re.match(r'^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$', s)
+		if m_iso:
+			h = int(m_iso.group(1) or 0)
+			m = int(m_iso.group(2) or 0)
+			ss = int(m_iso.group(3) or 0)
+			return h * 3600 + m * 60 + ss
+		if ':' in s:
+			parts = [p.strip() for p in s.split(':') if p.strip() != '']
+			try:
+				if len(parts) == 3:
+					return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(float(parts[2]))
+				if len(parts) == 2:
+					return int(parts[0]) * 60 + int(float(parts[1]))
+			except Exception:
+				pass
+		m_hms = re.search(r'(\d+)\s*h', s, re.I)
+		m_min = re.search(r'(\d+)\s*m', s, re.I)
+		m_sec = re.search(r'(\d+)\s*s', s, re.I)
+		if m_hms or m_min or m_sec:
+			return (int(m_hms.group(1)) if m_hms else 0) * 3600 \
+				 + (int(m_min.group(1)) if m_min else 0) * 60 \
+				 + (int(m_sec.group(1)) if m_sec else 0)
+		m_digits = re.search(r'^(\d+(?:\.\d+)?)$', s)
+		if m_digits:
+			try:
+				return int(float(m_digits.group(1)))
+			except Exception:
+				return None
+		return None
+
+	# ------------------------------------------------------------------
+	# Filtro por canal
+	# ------------------------------------------------------------------
+	filter_desc_parts = []  # para título y nombre de archivo
+	if canal_filter is not None:
+		canal_col = "canal"
+		if canal_col not in df.columns:
+			# Intentar búsqueda heurística
+			for c in df.columns:
+				if re.search(r'canal|channel|uploader|creator', c, re.I):
+					canal_col = c
+					break
+		if canal_col in df.columns:
+			df = df[df[canal_col].astype(str).str.strip().str.lower() == str(canal_filter).strip().lower()]
+			filter_desc_parts.append(f"canal={canal_filter}")
+			if df.empty:
+				print(f"No hay videos para el canal '{canal_filter}'.")
+				return None
+		else:
+			print("No se encontró la columna de canal para aplicar el filtro.")
+			return None
+
+	# ------------------------------------------------------------------
+	# Filtro por duración
+	# ------------------------------------------------------------------
+	if duracion_filter is not None:
+		min_seg, max_seg = duracion_filter
+		dur_col = "duracion_iso"
+		if dur_col not in df.columns:
+			for c in df.columns:
+				if re.search(r'duraci|duration|length|time_length', c, re.I):
+					dur_col = c
+					break
+		if dur_col in df.columns:
+			# Parsear duración a segundos
+			seconds_cols = {"duracion_segundos", "duration_seconds", "duration_sec", "length_seconds"}
+			if dur_col in seconds_cols:
+				df['__dur_filter_s'] = pd.to_numeric(df[dur_col], errors='coerce')
+				if df['__dur_filter_s'].notna().any():
+					maxv = df['__dur_filter_s'].max()
+					if pd.notna(maxv) and maxv > 1e6:
+						df['__dur_filter_s'] = (df['__dur_filter_s'] / 1000.0).astype(float)
+			else:
+				df['__dur_filter_s'] = df[dur_col].apply(_to_seconds)
+
+			df = df.dropna(subset=['__dur_filter_s'])
+			if df.empty:
+				print("No hay duraciones válidas tras parsear para el filtro de duración.")
+				return None
+
+			if min_seg is not None:
+				df = df[df['__dur_filter_s'] >= float(min_seg)]
+			if max_seg is not None:
+				df = df[df['__dur_filter_s'] <= float(max_seg)]
+
+			# Construir descripción legible del filtro
+			def _fmt_dur(seg):
+				if seg >= 3600:
+					h = seg / 3600
+					return f"{h:g}h"
+				if seg >= 60:
+					m = seg / 60
+					return f"{m:g}min"
+				return f"{seg:g}s"
+
+			if min_seg is not None and max_seg is not None:
+				filter_desc_parts.append(f"dur={_fmt_dur(min_seg)}-{_fmt_dur(max_seg)}")
+			elif min_seg is not None:
+				filter_desc_parts.append(f"dur>={_fmt_dur(min_seg)}")
+			elif max_seg is not None:
+				filter_desc_parts.append(f"dur<={_fmt_dur(max_seg)}")
+
+			if df.empty:
+				rng = f"[{min_seg}, {max_seg}]"
+				print(f"No hay videos en el rango de duración {rng} segundos.")
+				return None
+		else:
+			print("No se encontró la columna de duración para aplicar el filtro.")
+			return None
+
+	# ------------------------------------------------------------------
+	# Buscar columna de fecha/hora (mismo heurístico que otras funciones)
+	fallback_cols = [
+		"publish_time",
+		"publish_date",
+		"publishTimestamp",
+		"publishedAt",
+		"upload_time",
+		"uploaded_at",
+		"fecha_publicacion",
+		"fecha_publicación",
+		"fecha",
+		"published_at",
+	]
+	found = None
+	for c in fallback_cols:
+		if c in df.columns:
+			found = c
+			break
+	if not found:
+		for c in df.columns:
+			if re.search(r'publish|upload|date|time|fecha|publica|publicación|publicacion', c, re.I):
+				found = c
+				break
+	if not found:
+		print("No se encontró una columna de fecha/hora para el análisis de intervalos de 2h.")
+		return None
+
+	# Parsear fechas
+	try:
+		df[found] = pd.to_datetime(df[found], errors='coerce')
+	except Exception:
+		df[found] = pd.to_datetime(df[found].astype(str), errors='coerce')
+
+	df = df.dropna(subset=[found])
+	if df.empty:
+		print("No hay datos válidos con fechas para el análisis de intervalos de 2h.")
+		return None
+
+	# Extraer hora fraccionaria (horas con minutos/segundos) para soportar intervalos < 1h
+	df['__hour_frac'] = (
+		df[found].dt.hour.fillna(0).astype(float)
+		+ df[found].dt.minute.fillna(0).astype(float) / 60.0
+		+ df[found].dt.second.fillna(0).astype(float) / 3600.0
+	)
+
+	# Construir bins desde 0 hasta 24 con paso bin_size
+	n_steps = int(round(24.0 / bin_size))
+	bins = [round(i * bin_size, 6) for i in range(n_steps + 1)]
+
+	# Etiquetas legibles (minutos si bin_size < 1, horas si >=1)
+	def _label(a, b):
+		if bin_size < 1.0:
+			a_min = int(a * 60)
+			b_min = int(b * 60)
+			return f"{a_min}-{b_min}min"
+		else:
+			a_h = int(a)
+			b_h = int(b)
+			return f"{a_h}-{b_h}h"
+
+	labels = [_label(bins[i], bins[i+1]) for i in range(len(bins) - 1)]
+
+	# ------------------------------------------------------------------
+	# Modo por_dia: analizar cada día de la semana por separado
+	# ------------------------------------------------------------------
+	if por_dia:
+		suffix = f"_{re.sub(r'\\W+', '_', str(file_suffix)).strip('_')}" if file_suffix else ""
+		# If an explicit output_dir was provided, use it directly. Otherwise use outputs/Análisis del día
+		if output_dir is not None:
+			por_dia_dir = Path(output_dir)
+			por_dia_dir.mkdir(parents=True, exist_ok=True)
+		else:
+			por_dia_dir = outputs_root / "Análisis del día"
+			por_dia_dir.mkdir(parents=True, exist_ok=True)
+
+		# Preparar subcarpetas para <=1min y (1min,16min] dentro del directorio por_dia
+		long_dir = por_dia_dir / "1_16min"
+		short_dir = por_dia_dir / "menos_1min"
+		long_dir.mkdir(parents=True, exist_ok=True)
+		short_dir.mkdir(parents=True, exist_ok=True)
+
+		dias_semana = {
+			0: 'lunes',
+			1: 'martes',
+			2: 'miercoles',
+			3: 'jueves',
+			4: 'viernes',
+			5: 'sabado',
+			6: 'domingo',
+		}
+		dias_labels = {
+			0: 'lunes',
+			1: 'martes',
+			2: 'miércoles',
+			3: 'jueves',
+			4: 'viernes',
+			5: 'sábado',
+			6: 'domingo',
+		}
+
+		df['__weekday'] = df[found].dt.dayofweek  # Monday=0 .. Sunday=6
+		filter_label = " | ".join(filter_desc_parts) if filter_desc_parts else ""
+		all_results = {}
+
+
+
+		# Detectar columna de duración disponible (si existe)
+		dur_col = None
+		for c in df.columns:
+			if re.search(r'duraci|duration|length|time_length', c, re.I):
+				dur_col = c
+				break
+		# Calcular segundos en '__dur_s' si encontramos columna de duración
+		if dur_col:
+			seconds_cols = {"duracion_segundos", "duration_seconds", "duration_sec", "length_seconds"}
+			if dur_col in seconds_cols:
+				df['__dur_s'] = pd.to_numeric(df[dur_col], errors='coerce')
+				if df['__dur_s'].notna().any():
+					maxv = df['__dur_s'].max()
+					if pd.notna(maxv) and maxv > 1e6:
+						df['__dur_s'] = (df['__dur_s'] / 1000.0).astype(float)
+			else:
+				df['__dur_s'] = df[dur_col].apply(_to_seconds)
+
+		for day_num, day_name_file in dias_semana.items():
+			day_label = dias_labels[day_num]
+			df_day = df[df['__weekday'] == day_num]
+
+			if df_day.empty:
+				print(f"  Sin datos para {day_label}, se omite.")
+				continue
+
+			cats_day = pd.cut(df_day['__hour_frac'], bins=bins, labels=labels, include_lowest=True, right=False)
+			counts_day = cats_day.value_counts().reindex(labels, fill_value=0)
+
+			# Título
+			title_day = f'Publicaciones por intervalos ({day_label})'
+			if filter_label:
+				title_day += f'\n({filter_label})'
+
+			# Gráfico
+			plt.figure(figsize=(12, 5))
+			sns.barplot(x=list(counts_day.index), y=counts_day.values, palette='viridis')
+			plt.xticks(rotation=45, ha='right')
+			plt.xlabel('Intervalo horario')
+			plt.ylabel('Cantidad de videos publicados')
+			plt.title(title_day)
+			plt.tight_layout()
+
+			out_png = por_dia_dir / f"hour_2h_histogram_{day_name_file}.png"
+			plt.savefig(out_png, dpi=150)
+			print(f"  Histograma {day_label} guardado en {out_png}")
+
+			# TXT
+			out_txt = por_dia_dir / f"hour_2h_histogram_{day_name_file}.txt"
+			with open(out_txt, 'w', encoding='utf-8') as f:
+				if filter_label:
+					f.write(f"# Filtros: {filter_label}\n")
+				f.write(f"# Día: {day_label}\n")
+				f.write('Interval,Count\n')
+				for lbl, cnt in counts_day.items():
+					f.write(f"{lbl},{int(cnt)}\n")
+			print(f"  Conteos {day_label} guardados en {out_txt}")
+
+			plt.close()
+			all_results[day_label] = counts_day
+
+			# --- Guardar análisis para videos entre 1min y 16min en long_dir ---
+			try:
+				df_day_mid = df_day.copy()
+				if '__dur_s' in df_day_mid.columns:
+					df_day_mid = df_day_mid[(df_day_mid['__dur_s'] > 60) & (df_day_mid['__dur_s'] <= 16 * 60)]
+				else:
+					df_day_mid = df_day_mid.iloc[0:0]
+			except Exception:
+				df_day_mid = df_day.iloc[0:0]
+
+			cats_day_mid = pd.cut(df_day_mid['__hour_frac'] if not df_day_mid.empty else pd.Series([], dtype=float), bins=bins, labels=labels, include_lowest=True, right=False)
+			counts_day_mid = cats_day_mid.value_counts().reindex(labels, fill_value=0)
+
+			plt.figure(figsize=(12,5))
+			sns.barplot(x=list(counts_day_mid.index), y=counts_day_mid.values, palette='rocket')
+			plt.xticks(rotation=45, ha='right')
+			plt.xlabel('Intervalo horario')
+			plt.ylabel('Cantidad de videos publicados')
+			plt.title(f'Publicaciones por intervalos (1-16min) - {day_label}')
+			plt.tight_layout()
+
+			out_png_mid = long_dir / f"hour_2h_histogram_{day_name_file}.png"
+			plt.savefig(out_png_mid, dpi=150)
+			print(f"  Histograma 1-16min {day_label} guardado en {out_png_mid}")
+
+			out_txt_mid = long_dir / f"hour_2h_histogram_{day_name_file}.txt"
+			with open(out_txt_mid, 'w', encoding='utf-8') as f:
+				if filter_label:
+					f.write(f"# Filtros: {filter_label}\n")
+				f.write(f"# Día: {day_label}\n")
+				f.write('Interval,Count\n')
+				for lbl, cnt in counts_day_mid.items():
+					f.write(f"{lbl},{int(cnt)}\n")
+			print(f"  Conteos 1-16min {day_label} guardados en {out_txt_mid}")
+			plt.close()
+
+			# --- Guardar análisis para videos <=1min en short_dir ---
+			try:
+				df_day_short = df_day.copy()
+				if '__dur_s' in df_day_short.columns:
+					df_day_short = df_day_short[df_day_short['__dur_s'] <= 60]
+				else:
+					df_day_short = df_day_short.iloc[0:0]
+			except Exception:
+				df_day_short = df_day.iloc[0:0]
+
+			cats_day_short = pd.cut(df_day_short['__hour_frac'] if not df_day_short.empty else pd.Series([], dtype=float), bins=bins, labels=labels, include_lowest=True, right=False)
+			counts_day_short = cats_day_short.value_counts().reindex(labels, fill_value=0)
+
+			plt.figure(figsize=(12,5))
+			sns.barplot(x=list(counts_day_short.index), y=counts_day_short.values, palette='mako')
+			plt.xticks(rotation=45, ha='right')
+			plt.xlabel('Intervalo horario')
+			plt.ylabel('Cantidad de videos publicados')
+			plt.title(f'Publicaciones por intervalos (<=1min) - {day_label}')
+			plt.tight_layout()
+
+			out_png_short = short_dir / f"hour_2h_histogram_{day_name_file}.png"
+			plt.savefig(out_png_short, dpi=150)
+			print(f"  Histograma <=1min {day_label} guardado en {out_png_short}")
+
+			out_txt_short = short_dir / f"hour_2h_histogram_{day_name_file}.txt"
+			with open(out_txt_short, 'w', encoding='utf-8') as f:
+				if filter_label:
+					f.write(f"# Filtros: {filter_label}\n")
+				f.write(f"# Día: {day_label}\n")
+				f.write('Interval,Count\n')
+				for lbl, cnt in counts_day_short.items():
+					f.write(f"{lbl},{int(cnt)}\n")
+			print(f"  Conteos <=1min {day_label} guardados en {out_txt_short}")
+			plt.close()
+
+		print(f"\nAnálisis por día completado. Carpeta: {por_dia_dir}")
+		return all_results
+
+	# ------------------------------------------------------------------
+	# Modo normal (por_dia=False): análisis agregado
+	# ------------------------------------------------------------------
+
+	# pd.cut sobre la hora fraccionaria; usar right=False para [a,b)
+	cats = pd.cut(df['__hour_frac'], bins=bins, labels=labels, include_lowest=True, right=False)
+
+	counts = cats.value_counts().reindex(labels, fill_value=0)
+
+	# Construir título con info de filtros
+	filter_label = " | ".join(filter_desc_parts) if filter_desc_parts else ""
+	title = 'Publicaciones por intervalos de 2 horas'
+	if filter_label:
+		title += f'\n({filter_label})'
+
+	# Gráfico
+	plt.figure(figsize=(12,5))
+	sns.barplot(x=list(counts.index), y=counts.values, palette='viridis')
+	plt.xticks(rotation=45, ha='right')
+	plt.xlabel('Intervalo horario')
+	plt.ylabel('Cantidad de videos publicados')
+	plt.title(title)
+	plt.tight_layout()
+
+	suffix = f"_{re.sub(r'\\W+', '_', str(file_suffix)).strip('_')}" if file_suffix else ""
+	out_file = script_dir / f"hour_2h_histogram{suffix}.png"
+	plt.savefig(out_file, dpi=150)
+	print(f"Histograma 2h guardado en {out_file}")
+
+	# Guardar conteos a txt
+	txt_file = script_dir / f"hour_2h_histogram{suffix}.txt"
+	with open(txt_file, 'w', encoding='utf-8') as f:
+		if filter_label:
+			f.write(f"# Filtros: {filter_label}\n")
+		f.write('Interval,Count\n')
+		for lbl, cnt in counts.items():
+			f.write(f"{lbl},{int(cnt)}\n")
+	print(f"Conteos 2h guardados en {txt_file}")
+
+	plt.close()
+	return counts
 
 
 
@@ -2102,6 +2554,15 @@ def main() -> None:
 
 	# Videos entre 1min (exclusive) y 16min (<= 960s)
 	analyze_weekday_distribution(df, output_dir=weekdays_dir, file_suffix='1_16min', duracion_filter=(60, 16*60))
+
+	#--------------------------------------------------
+	# ANÁLISIS DEL DÍA 
+	#--------------------------------------------------
+	analisis_dia_dir = os.path.join(root, 'outputs', 'Análisis del día')
+	os.makedirs(analisis_dia_dir, exist_ok=True)
+ 
+	# Conteo de publicaciones por intervalos de 2 horas, con análisis separado por día de la semana
+	analyze_publications_2h_intervals(df, output_dir=analisis_dia_dir, por_dia=True)
 
 
 
