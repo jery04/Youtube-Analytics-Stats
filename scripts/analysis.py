@@ -2491,6 +2491,373 @@ def analyze_publications_2h_intervals(df, root=None, output_dir=None, file_suffi
 	plt.close()
 	return counts
 
+# Distribución de videos en intervalos de minutos (1-2,...,15-16) y segundos (0-10,...,50-60)
+def analyze_duration_interval_distribution(df, root=None, output_dir=None, file_suffix=None, save=True, show=False, minute_bins=None, second_bins=None):
+	"""
+	Cuenta la cantidad de videos en intervalos de duración configurables.
+
+	Args:
+		df: DataFrame con los datos.
+		root: Directorio raíz del proyecto.
+		output_dir: Directorio de salida personalizado (opcional).
+		file_suffix: Sufijo para los nombres de archivo (opcional).
+		save: Guardar imágenes en disco.
+		show: Mostrar figuras en pantalla.
+		minute_bins: Opcional. Define los intervalos en minutos para la gráfica
+			de minutos. Puede ser:
+				- None (valor por defecto): crea [(1,2),(2,3),...,(15,16)].
+				- lista de tuplas (low, high) en minutos.
+				- lista de enteros: cada entero `n` genera (n, n+1).
+		second_bins: Opcional. Define los intervalos en segundos para la gráfica
+			de segundos. Puede ser:
+				- None (valor por defecto): crea [(0,10),(10,20),...,(50,60)].
+				- lista de tuplas (low, high) en segundos.
+				- lista de enteros: cada entero `n` genera (n, n+10).
+
+	Genera histogramas con el porcentaje encima de cada barra y guarda PNG/TXT en
+	`outputs/Distribucion min` o `output_dir` si se provee.
+	"""
+	if root is None:
+		root = Path(__file__).resolve().parents[1]
+	outputs_root = root / "outputs"
+	outputs_root.mkdir(parents=True, exist_ok=True)
+	# Directorio destino
+	if output_dir is None:
+		script_dir = outputs_root / "Distribucion min"
+	else:
+		script_dir = Path(output_dir)
+	script_dir.mkdir(parents=True, exist_ok=True)
+
+	df = df.copy()
+
+	# Heurística para detectar columna de duración
+	duration_cols = [
+		"duration",
+		"duracion",
+		"duracion_iso",
+		"duracion_segundos",
+		"duracion_legible",
+		"video_duration",
+		"length",
+		"duration_sec",
+		"length_seconds",
+		"duration_seconds",
+		"duration_ms",
+	]
+	dur_col = None
+	for c in duration_cols:
+		if c in df.columns:
+			dur_col = c
+			break
+	if not dur_col:
+		for c in df.columns:
+			if re.search(r'duraci|duration|length|time_length', c, re.I):
+				dur_col = c
+				break
+
+	# Función para parsear a segundos (compatible con otras funciones)
+	def to_seconds(x):
+		if pd.isna(x):
+			return None
+		if isinstance(x, (int, float)) and not isinstance(x, bool):
+			val = float(x)
+			if val > 1e6:
+				return int(val / 1000)
+			return int(val)
+		s = str(x).strip()
+		m_iso = re.match(r'^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$', s)
+		if m_iso:
+			h = int(m_iso.group(1) or 0)
+			m = int(m_iso.group(2) or 0)
+			ss = int(m_iso.group(3) or 0)
+			return h*3600 + m*60 + ss
+		if ':' in s:
+			parts = [p.strip() for p in s.split(':') if p.strip()!='']
+			try:
+				if len(parts) == 3:
+					return int(parts[0])*3600 + int(parts[1])*60 + int(float(parts[2]))
+				if len(parts) == 2:
+					return int(parts[0])*60 + int(float(parts[1]))
+			except Exception:
+				pass
+		m_hms = re.search(r'(\d+)\s*h', s, re.I)
+		m_min = re.search(r'(\d+)\s*m', s, re.I)
+		m_sec = re.search(r'(\d+)\s*s', s, re.I)
+		if m_hms or m_min or m_sec:
+			return (int(m_hms.group(1)) if m_hms else 0)*3600 + (int(m_min.group(1)) if m_min else 0)*60 + (int(m_sec.group(1)) if m_sec else 0)
+		m_digits = re.search(r'^(\d+(?:\.\d+)?)$', s)
+		if m_digits:
+			try:
+				return int(float(m_digits.group(1)))
+			except Exception:
+				return None
+		return None
+
+	if '__duration_s' in df.columns:
+		# usar columna ya existente
+		df['__duration_s'] = pd.to_numeric(df['__duration_s'], errors='coerce')
+	else:
+		if dur_col is None:
+			print('No se encontró columna de duración para analyze_duration_interval_distribution.')
+			return None
+		seconds_cols = {"duracion_segundos", "duration_seconds", "duration_sec", "length_seconds"}
+		if dur_col in seconds_cols:
+			df['__duration_s'] = pd.to_numeric(df[dur_col], errors='coerce')
+			if df['__duration_s'].notna().any():
+				maxv = df['__duration_s'].max()
+				if pd.notna(maxv) and maxv > 1e6:
+					df['__duration_s'] = (df['__duration_s'] / 1000.0).astype(float)
+		else:
+			df['__duration_s'] = df[dur_col].apply(to_seconds)
+
+	df = df.dropna(subset=['__duration_s'])
+	if df.empty:
+		print('No hay duraciones válidas para analyze_duration_interval_distribution.')
+		return None
+
+	# --- MINUTOS: intervalos configurables ---
+	def _normalize_bins(bins, default_tuples, default_step):
+		if bins is None:
+			return default_tuples
+		# lista de tuplas (low, high)
+		if all(isinstance(b, (list, tuple)) and len(b) == 2 for b in bins):
+			try:
+				return [(int(a), int(b)) for a, b in bins]
+			except Exception:
+				return default_tuples
+		# lista de números -> crear (n, n+step)
+		try:
+			nums = [int(x) for x in bins]
+			return [(n, n + default_step) for n in nums]
+		except Exception:
+			return default_tuples
+
+	default_minute = [(i, i+1) for i in range(1, 16)]
+	minute_bins_norm = _normalize_bins(minute_bins, default_minute, 1)
+	minute_labels = [f"{a}-{b}min" for a, b in minute_bins_norm]
+	minute_counts = []
+	for low, high in minute_bins_norm:
+		cnt = int(((df['__duration_s'] > low*60) & (df['__duration_s'] <= high*60)).sum())
+		minute_counts.append(cnt)
+	min_total = sum(minute_counts)
+
+	# Plot minutos
+	plt.figure(figsize=(12,6))
+	ax = sns.barplot(x=minute_labels, y=minute_counts, palette='viridis')
+	plt.xlabel('Intervalo (min)')
+	plt.ylabel('Cantidad de videos')
+	plt.title('Distribución por duración (minutos)')
+
+	# Anotar porcentaje encima de cada barra
+	for i, v in enumerate(minute_counts):
+		pct = (v / min_total * 100) if min_total > 0 else 0
+		ax.annotate(f"{pct:.1f}%", (i, v), textcoords="offset points", xytext=(0,5), ha='center', fontsize=9)
+
+	plt.xticks(rotation=45, ha='right')
+	plt.tight_layout()
+	# Lógica para sufijos según reglas del usuario
+	suffix_min = ""
+	suffix_sec = ""
+	if file_suffix:
+		# Ambos bins especificados
+		if minute_bins is not None and second_bins is not None:
+			suffix_min = suffix_sec = f"_{re.sub(r'\\W+', '_', str(file_suffix)).strip('_')}"
+		# Solo uno de los bins especificado
+		elif minute_bins is not None and second_bins is None:
+			suffix_min = f"_{re.sub(r'\\W+', '_', str(file_suffix)).strip('_')}"
+		elif second_bins is not None and minute_bins is None:
+			suffix_sec = f"_{re.sub(r'\\W+', '_', str(file_suffix)).strip('_')}"
+		# Ningún bin especificado
+		elif minute_bins is None and second_bins is None:
+			suffix_min = suffix_sec = f"_{re.sub(r'\\W+', '_', str(file_suffix)).strip('_')}"
+
+	out_png = script_dir / f"duration_distribution_minutes{suffix_min}.png"
+	if save:
+		plt.savefig(out_png, dpi=150)
+		print(f"Histograma minutos guardado en {out_png}")
+	out_txt = script_dir / f"duration_distribution_minutes{suffix_min}.txt"
+	with open(out_txt, 'w', encoding='utf-8') as f:
+		f.write('Interval,Count,Percent\n')
+		for lbl, cnt in zip(minute_labels, minute_counts):
+			pct = (cnt / min_total * 100) if min_total > 0 else 0
+			f.write(f"{lbl},{int(cnt)},{pct:.2f}\n")
+	plt.close()
+
+	# --- SEGUNDOS: intervalos configurables ---
+	default_seconds = [(i, i+10) for i in range(0, 60, 10)]
+	second_bins_norm = _normalize_bins(second_bins, default_seconds, 10)
+	second_labels = [f"{a}-{b}s" for a, b in second_bins_norm]
+	second_counts = []
+	for low, high in second_bins_norm:
+		# primer intervalo: >0 hasta <=high, otros: >low <=high
+		if low == 0:
+			cnt = int(((df['__duration_s'] > 0) & (df['__duration_s'] <= high)).sum())
+		else:
+			cnt = int(((df['__duration_s'] > low) & (df['__duration_s'] <= high)).sum())
+		second_counts.append(cnt)
+	sec_total = sum(second_counts)
+
+	plt.figure(figsize=(10,5))
+	ax2 = sns.barplot(x=second_labels, y=second_counts, palette='rocket')
+	plt.xlabel('Intervalo (s)')
+	plt.ylabel('Cantidad de videos')
+	plt.title('Distribución por duración (segundos, hasta 60s)')
+
+	for i, v in enumerate(second_counts):
+		pct = (v / sec_total * 100) if sec_total > 0 else 0
+		ax2.annotate(f"{pct:.1f}%", (i, v), textcoords="offset points", xytext=(0,5), ha='center', fontsize=9)
+
+	plt.tight_layout()
+	out_png2 = script_dir / f"duration_distribution_seconds{suffix_sec}.png"
+	if save:
+		plt.savefig(out_png2, dpi=150)
+		print(f"Histograma segundos guardado en {out_png2}")
+	out_txt2 = script_dir / f"duration_distribution_seconds{suffix_sec}.txt"
+	with open(out_txt2, 'w', encoding='utf-8') as f:
+		f.write('Interval,Count,Percent\n')
+		for lbl, cnt in zip(second_labels, second_counts):
+			pct = (cnt / sec_total * 100) if sec_total > 0 else 0
+			f.write(f"{lbl},{int(cnt)},{pct:.2f}\n")
+
+	plt.close()
+
+	# Devolver diccionario con resultados
+	return {
+		'minutes': pd.DataFrame({'interval': minute_labels, 'count': minute_counts, 'percent': [round((c/min_total*100) if min_total>0 else 0,2) for c in minute_counts]}),
+		'seconds': pd.DataFrame({'interval': second_labels, 'count': second_counts, 'percent': [round((c/sec_total*100) if sec_total>0 else 0,2) for c in second_counts]}),
+	}
+
+# Genera un gráfico de pastel con la distribución de categorías en el dataset
+def plot_category_pie(df=None, csv_path=None, root=None, output_dir=None, file_suffix=None, save=True, show=False):
+	"""
+	Detecta la columna de categoría del DataFrame (heurística) y genera
+	un gráfico de pastel con la distribución de las distintas categorías.
+	Guarda PNG y TXT en `outputs/EDA` por defecto o en `output_dir` si se
+	proporciona.
+
+	Retorna DataFrame con columnas ['category','count','percent'] o None.
+	"""
+	if root is None:
+		root = Path(__file__).resolve().parents[1]
+	outputs_root = root / "outputs"
+	outputs_root.mkdir(parents=True, exist_ok=True)
+	# Por defecto usar outputs/EDA
+	if output_dir is None:
+		script_dir = outputs_root / "EDA"
+	else:
+		script_dir = Path(output_dir)
+	script_dir.mkdir(parents=True, exist_ok=True)
+
+	# Cargar dataframe si no se recibió
+	if df is None:
+		if csv_path is None:
+			csv_path = root / 'dataset' / 'videos.csv'
+		try:
+			df = pd.read_csv(csv_path, low_memory=False)
+		except Exception as e:
+			print(f"No se pudo cargar CSV desde {csv_path}: {e}")
+			return None
+
+	df = df.copy()
+
+	# Heurística para detectar columna de categoría
+	candidate_cols = [
+		'category', 'categoria', 'category_id', 'categoryId', 'categoria_id',
+		'category_name', 'categoryName', 'categoria_name'
+	]
+	found = None
+	for c in candidate_cols:
+		if c in df.columns:
+			found = c
+			break
+	if not found:
+		for c in df.columns:
+			if re.search(r'cat(egor|egoria|egory)|category', c, re.I):
+				found = c
+				break
+	if not found:
+		print("No se encontró una columna de categoría en el dataset.")
+		return None
+
+	# Normalizar y contar
+	df = df.dropna(subset=[found])
+	if df.empty:
+		print("No hay valores de categoría para generar el gráfico.")
+		# Generar imagen indicativa
+		labels = ['No data']
+		sizes = [1]
+		plt.figure(figsize=(8,8))
+		wedges, texts, autotexts = plt.pie(sizes, labels=None, autopct=lambda p: '', colors=['#cccccc'], startangle=90, wedgeprops={'linewidth':0.5,'edgecolor':'white'})
+		plt.legend(wedges, labels, title="Categoría", loc="center left", bbox_to_anchor=(1, 0.5))
+		plt.title('Distribución por categoría')
+		plt.tight_layout()
+		suffix = f"_{re.sub(r'\\W+', '_', str(file_suffix)).strip('_')}" if file_suffix else ""
+		out_file = script_dir / f"category_pie{suffix}.png"
+		if save:
+			plt.savefig(out_file, dpi=150)
+			print(f"Gráfico indicativo de categorías guardado en {out_file}")
+		txt_file = out_file.with_suffix('.txt')
+		with open(txt_file, 'w', encoding='utf-8') as f:
+			f.write('Category,Count,Percent\n')
+		plt.close()
+		return None
+
+	df[found] = df[found].astype(str).str.strip()
+	df = df[df[found] != '']
+	if df.empty:
+		print("Después de normalizar no hay categorías válidas.")
+		return None
+
+	counts = df[found].value_counts()
+	total = int(counts.sum())
+	if total == 0:
+		print("No hay filas con categoría para contar.")
+		return None
+
+	perc = (counts / total * 100).round(2)
+
+	# Preparar gráfico
+	labels = [str(l) for l in counts.index]
+	sizes = counts.values.tolist()
+	colors = plt.cm.tab20([i / max(1, len(labels)-1) for i in range(len(labels))])
+
+	plt.figure(figsize=(8,8))
+	wedges, texts, autotexts = plt.pie(
+		sizes,
+		labels=None,
+		autopct=lambda p: f"{p:.1f}%" if p > 1 else '',
+		colors=colors,
+		startangle=90,
+		pctdistance=0.75,
+		wedgeprops={'linewidth': 0.5, 'edgecolor': 'white'}
+	)
+	for t in autotexts:
+		t.set_fontsize(11)
+		t.set_weight('bold')
+		t.set_color('white')
+
+	plt.legend(wedges, labels, title="Categoría", loc="center left", bbox_to_anchor=(1, 0.5), fontsize=10, title_fontsize=12)
+	plt.title('Distribución por categoría')
+	plt.tight_layout()
+
+	suffix = f"_{re.sub(r'\\W+', '_', str(file_suffix)).strip('_')}" if file_suffix else ""
+	out_file = script_dir / f"category_pie{suffix}.png"
+	if save:
+		plt.savefig(out_file, dpi=150)
+		print(f"Gráfico de categorías guardado en {out_file}")
+
+	txt_file = out_file.with_suffix('.txt')
+	with open(txt_file, 'w', encoding='utf-8') as f:
+		f.write('Category,Count,Percent\n')
+		for cat, cnt, p in zip(labels, counts.values, perc.values):
+			f.write(f"{cat},{int(cnt)},{p:.2f}\n")
+	print(f"Conteos de categorías guardados en {txt_file}")
+
+	if show:
+		plt.show()
+	plt.close()
+
+	return pd.DataFrame({'category': counts.index, 'count': counts.values, 'percent': perc.values})
 
 
 # Función principal para ejecutar el análisis
@@ -2518,6 +2885,9 @@ def main() -> None:
 	
  	# Generar gráfico de distribución por calidad/definición y guardarlo en outputs/EDA
 	plot_definicion_pie(df=df, output_dir=eda_dir)
+
+	# Generar gráfico de distribución por categorías y guardarlo en outputs/EDA
+	plot_category_pie(df=df, output_dir=eda_dir)
 
 	#--------------------------------------------------
  	# TÍTULO Y DESCRIPCIÓN
@@ -2563,6 +2933,22 @@ def main() -> None:
  
 	# Conteo de publicaciones por intervalos de 2 horas, con análisis separado por día de la semana
 	analyze_publications_2h_intervals(df, output_dir=analisis_dia_dir, por_dia=True)
+
+	#--------------------------------------------------
+	# DISTRIBUCIÓN DE DURACIÓN EN INTERVALOS DE MINUTOS Y SEGUNDOS
+	#--------------------------------------------------
+	dist_dir = os.path.join(root, 'outputs', 'Distribucion min')
+	os.makedirs(dist_dir, exist_ok=True)
+ 
+	# Generar histogramas de distribución de duración en intervalos de minutos (1-2,...,15-16)
+	# y segundos personalizados para <=1min
+	second_bins_custom_1 = [(0,10), (11,20), (20,30), (30,45), (45,60)]
+	second_bins_custom_2 = [(0,15), (15,30), (30,45), (45,60)]
+	second_bins_custom_3 = [(0,5), (5,10), (10,15), (15,20), (20,30), (30,40), (40,50), (50,60)]
+ 
+	analyze_duration_interval_distribution(df, output_dir=dist_dir, second_bins=second_bins_custom_1, file_suffix='sbins_v1')
+	analyze_duration_interval_distribution(df, output_dir=dist_dir, second_bins=second_bins_custom_2, file_suffix='sbins_v2')
+	analyze_duration_interval_distribution(df, output_dir=dist_dir, second_bins=second_bins_custom_3, file_suffix='sbins_v3')
 
 if __name__ == '__main__':
 	main()
