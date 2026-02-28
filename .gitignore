@@ -1,0 +1,17 @@
+# Ignore the outputs directory and all its contents (no images, txt, etc. will be uploaded)
+/outputs/
+
+# Extra safety: ignore common image and text extensions anywhere under outputs
+/outputs/**/*.png
+/outputs/**/*.jpg
+/outputs/**/*.jpeg
+/outputs/**/*.gif
+/outputs/**/*.bmp
+/outputs/**/*.svg
+/outputs/**/*.webp
+/outputs/**/*.txt
+/outputs/**/*.md
+
+# Ignore Python virtual environment
+/.venv/
+/.venv/**
