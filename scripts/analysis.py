@@ -2257,16 +2257,16 @@ def analyze_publications_2h_intervals(df, root=None, output_dir=None, file_suffi
 	n_steps = int(round(24.0 / bin_size))
 	bins = [round(i * bin_size, 6) for i in range(n_steps + 1)]
 
-	# Etiquetas legibles (minutos si bin_size < 1, horas si >=1)
+	# Etiquetas legibles (minutos si bin_size < 1, horas si >=1) – notación (a, b]
 	def _label(a, b):
 		if bin_size < 1.0:
 			a_min = int(a * 60)
 			b_min = int(b * 60)
-			return f"{a_min}-{b_min}min"
+			return f"({a_min}-{b_min}]min"
 		else:
 			a_h = int(a)
 			b_h = int(b)
-			return f"{a_h}-{b_h}h"
+			return f"({a_h}-{b_h}]h"
 
 	labels = [_label(bins[i], bins[i+1]) for i in range(len(bins) - 1)]
 
@@ -2340,7 +2340,7 @@ def analyze_publications_2h_intervals(df, root=None, output_dir=None, file_suffi
 				print(f"  Sin datos para {day_label}, se omite.")
 				continue
 
-			cats_day = pd.cut(df_day['__hour_frac'], bins=bins, labels=labels, include_lowest=True, right=False)
+			cats_day = pd.cut(df_day['__hour_frac'], bins=bins, labels=labels, include_lowest=True, right=True)
 			counts_day = cats_day.value_counts().reindex(labels, fill_value=0)
 
 			# Título
@@ -2385,7 +2385,7 @@ def analyze_publications_2h_intervals(df, root=None, output_dir=None, file_suffi
 			except Exception:
 				df_day_mid = df_day.iloc[0:0]
 
-			cats_day_mid = pd.cut(df_day_mid['__hour_frac'] if not df_day_mid.empty else pd.Series([], dtype=float), bins=bins, labels=labels, include_lowest=True, right=False)
+			cats_day_mid = pd.cut(df_day_mid['__hour_frac'] if not df_day_mid.empty else pd.Series([], dtype=float), bins=bins, labels=labels, include_lowest=True, right=True)
 			counts_day_mid = cats_day_mid.value_counts().reindex(labels, fill_value=0)
 
 			plt.figure(figsize=(12,5))
@@ -2421,7 +2421,7 @@ def analyze_publications_2h_intervals(df, root=None, output_dir=None, file_suffi
 			except Exception:
 				df_day_short = df_day.iloc[0:0]
 
-			cats_day_short = pd.cut(df_day_short['__hour_frac'] if not df_day_short.empty else pd.Series([], dtype=float), bins=bins, labels=labels, include_lowest=True, right=False)
+			cats_day_short = pd.cut(df_day_short['__hour_frac'] if not df_day_short.empty else pd.Series([], dtype=float), bins=bins, labels=labels, include_lowest=True, right=True)
 			counts_day_short = cats_day_short.value_counts().reindex(labels, fill_value=0)
 
 			plt.figure(figsize=(12,5))
@@ -2454,8 +2454,8 @@ def analyze_publications_2h_intervals(df, root=None, output_dir=None, file_suffi
 	# Modo normal (por_dia=False): análisis agregado
 	# ------------------------------------------------------------------
 
-	# pd.cut sobre la hora fraccionaria; usar right=False para [a,b)
-	cats = pd.cut(df['__hour_frac'], bins=bins, labels=labels, include_lowest=True, right=False)
+	# pd.cut sobre la hora fraccionaria; usar right=True para (a,b]
+	cats = pd.cut(df['__hour_frac'], bins=bins, labels=labels, include_lowest=True, right=True)
 
 	counts = cats.value_counts().reindex(labels, fill_value=0)
 
@@ -3985,6 +3985,492 @@ def monte_carlo_description_length(
 	print(f"{'='*60}\n")
 	return all_results
 
+# Monte Carlo – Intervalos de 2 h por día de la semana (separado por duración)
+def monte_carlo_hourly_by_weekday(
+	df: pd.DataFrame,
+	output_dir: str | None = None,
+	n_rounds: int = 200_000,
+	seed: int = 42,
+	save: bool = True,
+	show: bool = False,
+) -> dict:
+	"""
+	Simulación Monte Carlo por intervalos de 2 h, ejecutada por separado para
+	cada día de la semana y cada bucket de duración (≤1 min y 1-16 min).
+
+	Para un día dado se divide la jornada (hora militar) en intervalos de 2 h:
+	(0-2], (2-4], …, (22-24].  En cada ronda se elige un video aleatorio de
+	cada intervalo que contenga al menos un video y el intervalo cuyo video
+	seleccionado tiene el mayor *viewCount* gana esa ronda.  Los intervalos
+	vacíos se ignoran; la ronda se lleva a cabo igualmente.
+
+	Se generan dos carpetas dentro de ``output_dir`` (por defecto
+	*outputs/Random*):
+
+	* ``menos_1min/``  – videos con duración ≤ 60 s
+	* ``1_16min/``     – videos con 60 < duración ≤ 960 s
+
+	Dentro de cada carpeta se guarda un archivo TXT y una imagen PNG por día.
+	"""
+
+	if output_dir is None:
+		root = Path(__file__).resolve().parents[1]
+		output_dir = root / "outputs" / "Random"
+	else:
+		output_dir = Path(output_dir)
+	output_dir.mkdir(parents=True, exist_ok=True)
+
+	# ── Resolver columnas ────────────────────────────────────────────────
+	# Fecha/hora
+	date_candidates = [
+		"publishedAt", "published_at", "fecha_publicacion",
+		"fecha", "date", "upload_date",
+	]
+	date_col = None
+	for c in date_candidates:
+		if c in df.columns:
+			date_col = c
+			break
+	if date_col is None:
+		for c in df.columns:
+			if re.search(r'publish|upload|date|time|fecha|publica|publicación|publicacion', c, re.I):
+				date_col = c
+				break
+	if date_col is None:
+		print("monte_carlo_hourly_by_weekday: No se encontró columna de fecha/hora.")
+		return {}
+
+	# Vistas
+	view_candidates = [
+		"viewCount", "views", "vistas", "visualizaciones",
+		"view_count", "reproducciones",
+	]
+	view_col = None
+	for c in view_candidates:
+		if c in df.columns:
+			view_col = c
+			break
+	if view_col is None:
+		for c in df.columns:
+			if re.search(r'view|vista|visual|reproduc', c, re.I):
+				view_col = c
+				break
+	if view_col is None:
+		print("monte_carlo_hourly_by_weekday: No se encontró columna de vistas.")
+		return {}
+
+	# Duración
+	duration_candidates = [
+		"durationSeconds", "duracion_segundos", "duration_seconds",
+		"duration_sec", "length_seconds",
+	]
+	dur_col = None
+	for c in duration_candidates:
+		if c in df.columns:
+			dur_col = c
+			break
+	if dur_col is None:
+		for c in df.columns:
+			if re.search(r'duraci|duration|length', c, re.I):
+				dur_col = c
+				break
+	if dur_col is None:
+		print("monte_carlo_hourly_by_weekday: No se encontró columna de duración.")
+		return {}
+
+	# ── Preparar datos ──────────────────────────────────────────────────
+	tmp = df[[date_col, view_col, dur_col]].copy()
+	try:
+		tmp[date_col] = pd.to_datetime(tmp[date_col], format='mixed', errors='coerce')
+	except Exception:
+		tmp[date_col] = pd.to_datetime(tmp[date_col].astype(str), format='mixed', errors='coerce')
+	tmp["views"] = pd.to_numeric(tmp[view_col], errors="coerce")
+	tmp["dur_s"] = pd.to_numeric(tmp[dur_col], errors="coerce")
+	tmp = tmp.dropna(subset=[date_col, "views", "dur_s"])
+	if tmp.empty:
+		print("monte_carlo_hourly_by_weekday: No hay datos válidos.")
+		return {}
+	tmp["views"] = tmp["views"].astype(int)
+	tmp["dur_s"] = tmp["dur_s"].astype(float)
+	tmp["weekday"] = tmp[date_col].dt.dayofweek   # Monday=0 … Sunday=6
+	tmp["hour_frac"] = (
+		tmp[date_col].dt.hour.astype(float)
+		+ tmp[date_col].dt.minute.astype(float) / 60.0
+		+ tmp[date_col].dt.second.astype(float) / 3600.0
+	)
+
+	weekday_labels = ['lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado', 'domingo']
+	hour_bins = [(h, h + 2) for h in range(0, 24, 2)]  # 12 intervalos de 2 h
+	hour_labels = [f"({lo:02d}-{hi:02d}]" for lo, hi in hour_bins]
+
+	duration_buckets = [
+		("menos_1min", lambda s: s <= 60,               "≤1min"),
+		("1_16min",    lambda s: (s > 60) & (s <= 960), "1-16min"),
+	]
+
+	# ── Funciones internas ──────────────────────────────────────────────
+	def _plot_histogram(res: dict, title: str, filepath: Path):
+		if not res:
+			return
+		lbls = list(res.keys())
+		pcts = [res[l] for l in lbls]
+
+		fig, ax = plt.subplots(figsize=(14, 6))
+		bars = ax.bar(
+			range(len(lbls)), pcts,
+			color=sns.color_palette("viridis", len(lbls)),
+			edgecolor="black",
+		)
+		ax.set_xticks(range(len(lbls)))
+		ax.set_xticklabels(lbls, rotation=30, ha="right", fontsize=10)
+		ax.set_ylabel("% de victorias", fontsize=12)
+		ax.set_xlabel("Intervalo horario (hora militar)", fontsize=12)
+		ax.set_title(title, fontsize=13, fontweight="bold")
+
+		for bar, pct in zip(bars, pcts):
+			ax.text(
+				bar.get_x() + bar.get_width() / 2,
+				bar.get_height() + 0.3,
+				f"{pct:.2f}%",
+				ha="center", va="bottom", fontsize=9, fontweight="bold",
+			)
+
+		plt.tight_layout()
+		if save:
+			fig.savefig(filepath, dpi=150)
+			print(f"  Imagen guardada: {filepath}")
+		if show:
+			plt.show()
+		plt.close(fig)
+
+	def _save_txt(res: dict, filepath: Path, title: str, counts_d: dict | None = None):
+		if not res:
+			return
+		with open(filepath, "w", encoding="utf-8") as f:
+			f.write(f"{title}\n")
+			f.write(f"Rondas: {n_rounds:,}\n")
+			f.write(f"{'Intervalo':<18}{'Count':>8}{'Victorias':>12}{'%':>10}\n")
+			f.write("-" * 48 + "\n")
+			for label, pct in res.items():
+				wins_count = int(round(pct / 100 * n_rounds))
+				count_val = counts_d.get(label, 0) if counts_d else 0
+				f.write(f"{label:<18}{count_val:>8,}{wins_count:>12,}{pct:>9.2f}%\n")
+		print(f"  Datos guardados: {filepath}")
+
+	# ── Simulación ──────────────────────────────────────────────────────
+	print(f"\n{'='*60}")
+	print(f"Monte Carlo – Intervalos de 2 h por día de la semana ({n_rounds:,} rondas)")
+	print(f"{'='*60}")
+
+	all_results: dict = {}
+
+	for bucket_name, bucket_cond, bucket_label in duration_buckets:
+		bucket_dir = output_dir / bucket_name
+		bucket_dir.mkdir(parents=True, exist_ok=True)
+
+		print(f"\n■ Bucket {bucket_label}  →  {bucket_dir}")
+		tmp_bucket = tmp[bucket_cond(tmp["dur_s"])].copy()
+		if tmp_bucket.empty:
+			print(f"  Sin datos para {bucket_label}; omitido.")
+			continue
+
+		bucket_results: dict = {}
+
+		for wd_idx, wd_label in enumerate(weekday_labels):
+			day_df = tmp_bucket[tmp_bucket["weekday"] == wd_idx]
+			if day_df.empty:
+				print(f"  {wd_label}: sin videos; omitido.")
+				continue
+
+			# Agrupar por intervalo de 2 h – notación (a, b]
+			interval_videos: dict[str, np.ndarray] = {}
+			for (lo, hi), hlabel in zip(hour_bins, hour_labels):
+				if lo == 0:
+					mask = (day_df["hour_frac"] >= lo) & (day_df["hour_frac"] <= hi)
+				else:
+					mask = (day_df["hour_frac"] > lo) & (day_df["hour_frac"] <= hi)
+				varr = day_df.loc[mask, "views"].values
+				if len(varr) > 0:
+					interval_videos[hlabel] = varr
+
+			if len(interval_videos) < 2:
+				print(f"  {wd_label}: menos de 2 intervalos con videos; omitido.")
+				continue
+
+			labels = list(interval_videos.keys())
+			arrays = [interval_videos[l] for l in labels]
+			n_int = len(labels)
+			counts = {labels[i]: len(arrays[i]) for i in range(n_int)}
+
+			# Simulación vectorizada
+			rng = np.random.default_rng(seed)
+			wins = np.zeros(n_int, dtype=np.int64)
+
+			idx_matrix = [rng.integers(0, len(arr), size=n_rounds) for arr in arrays]
+			views_matrix = np.column_stack(
+				[arr[idx] for arr, idx in zip(arrays, idx_matrix)]
+			)  # (n_rounds, n_int)
+
+			winners = np.argmax(views_matrix, axis=1)
+			for i in range(n_int):
+				wins[i] = np.sum(winners == i)
+
+			win_pct = wins / n_rounds * 100
+			results = {labels[i]: float(win_pct[i]) for i in range(n_int)}
+
+			# Guardar
+			safe_day = wd_label.replace("á", "a").replace("é", "e").replace("í", "i").replace("ó", "o").replace("ú", "u")
+			fname = f"monte_carlo_hourly_{safe_day}"
+
+			_plot_histogram(
+				results,
+				f"Monte Carlo – Victorias por franja horaria · {wd_label} ({bucket_label})\n{n_rounds:,} rondas",
+				bucket_dir / f"{fname}.png",
+			)
+			_save_txt(
+				results,
+				bucket_dir / f"{fname}.txt",
+				f"Monte Carlo – Franja horaria · {wd_label} ({bucket_label})",
+				counts_d=counts,
+			)
+
+			bucket_results[wd_label] = results
+
+		all_results[bucket_name] = bucket_results
+
+	print(f"{'='*60}\n")
+	return all_results
+
+# Monte Carlo – Intervalos de 2 h (sin separar por día de la semana, solo por duración)
+def monte_carlo_hourly_2h(
+	df: pd.DataFrame,
+	output_dir: str | None = None,
+	n_rounds: int = 200_000,
+	seed: int = 42,
+	save: bool = True,
+	show: bool = False,
+) -> dict:
+	"""
+	Simulación Monte Carlo por intervalos de 2 h (sin separar por día de la
+	semana).  Genera **una imagen** por bucket de duración:
+
+	* ``monte_carlo_hourly_2h_le1min.png``  – videos con duración ≤ 60 s
+	* ``monte_carlo_hourly_2h_1_16min.png`` – videos con 60 < duración ≤ 960 s
+
+	En cada ronda se elige un video aleatorio de cada intervalo de 2 h que
+	contenga al menos un video y el intervalo cuyo video seleccionado tiene el
+	mayor *viewCount* gana esa ronda.
+	"""
+
+	if output_dir is None:
+		root = Path(__file__).resolve().parents[1]
+		output_dir = root / "outputs" / "Random"
+	else:
+		output_dir = Path(output_dir)
+	output_dir.mkdir(parents=True, exist_ok=True)
+
+	# ── Resolver columnas ────────────────────────────────────────────────
+	date_candidates = [
+		"publishedAt", "published_at", "fecha_publicacion",
+		"fecha", "date", "upload_date",
+	]
+	date_col = None
+	for c in date_candidates:
+		if c in df.columns:
+			date_col = c
+			break
+	if date_col is None:
+		for c in df.columns:
+			if re.search(r'publish|upload|date|time|fecha|publica|publicación|publicacion', c, re.I):
+				date_col = c
+				break
+	if date_col is None:
+		print("monte_carlo_hourly_2h: No se encontró columna de fecha/hora.")
+		return {}
+
+	view_candidates = [
+		"viewCount", "views", "vistas", "visualizaciones",
+		"view_count", "reproducciones",
+	]
+	view_col = None
+	for c in view_candidates:
+		if c in df.columns:
+			view_col = c
+			break
+	if view_col is None:
+		for c in df.columns:
+			if re.search(r'view|vista|visual|reproduc', c, re.I):
+				view_col = c
+				break
+	if view_col is None:
+		print("monte_carlo_hourly_2h: No se encontró columna de vistas.")
+		return {}
+
+	duration_candidates = [
+		"durationSeconds", "duracion_segundos", "duration_seconds",
+		"duration_sec", "length_seconds",
+	]
+	dur_col = None
+	for c in duration_candidates:
+		if c in df.columns:
+			dur_col = c
+			break
+	if dur_col is None:
+		for c in df.columns:
+			if re.search(r'duraci|duration|length', c, re.I):
+				dur_col = c
+				break
+	if dur_col is None:
+		print("monte_carlo_hourly_2h: No se encontró columna de duración.")
+		return {}
+
+	# ── Preparar datos ──────────────────────────────────────────────────
+	tmp = df[[date_col, view_col, dur_col]].copy()
+	try:
+		tmp[date_col] = pd.to_datetime(tmp[date_col], format='mixed', errors='coerce')
+	except Exception:
+		tmp[date_col] = pd.to_datetime(tmp[date_col].astype(str), format='mixed', errors='coerce')
+	tmp["views"] = pd.to_numeric(tmp[view_col], errors="coerce")
+	tmp["dur_s"] = pd.to_numeric(tmp[dur_col], errors="coerce")
+	tmp = tmp.dropna(subset=[date_col, "views", "dur_s"])
+	if tmp.empty:
+		print("monte_carlo_hourly_2h: No hay datos válidos.")
+		return {}
+	tmp["views"] = tmp["views"].astype(int)
+	tmp["dur_s"] = tmp["dur_s"].astype(float)
+	tmp["hour_frac"] = (
+		tmp[date_col].dt.hour.astype(float)
+		+ tmp[date_col].dt.minute.astype(float) / 60.0
+		+ tmp[date_col].dt.second.astype(float) / 3600.0
+	)
+
+	hour_bins = [(h, h + 2) for h in range(0, 24, 2)]  # 12 intervalos
+	hour_labels = [f"({lo:02d}-{hi:02d}]" for lo, hi in hour_bins]
+
+	duration_buckets = [
+		("le1min",  lambda s: s <= 60,               "≤1min"),
+		("1_16min", lambda s: (s > 60) & (s <= 960), "1-16min"),
+	]
+
+	# ── Funciones internas ──────────────────────────────────────────────
+	def _plot(res: dict, title: str, filepath: Path, counts_d: dict):
+		if not res:
+			return
+		lbls = list(res.keys())
+		pcts = [res[l] for l in lbls]
+
+		fig, ax = plt.subplots(figsize=(14, 6))
+		bars = ax.bar(
+			range(len(lbls)), pcts,
+			color=sns.color_palette("viridis", len(lbls)),
+			edgecolor="black",
+		)
+		ax.set_xticks(range(len(lbls)))
+		ax.set_xticklabels(lbls, rotation=30, ha="right", fontsize=10)
+		ax.set_ylabel("% de victorias", fontsize=12)
+		ax.set_xlabel("Intervalo horario (hora militar)", fontsize=12)
+		ax.set_title(title, fontsize=13, fontweight="bold")
+
+		for bar, pct in zip(bars, pcts):
+			ax.text(
+				bar.get_x() + bar.get_width() / 2,
+				bar.get_height() + 0.3,
+				f"{pct:.2f}%",
+				ha="center", va="bottom", fontsize=9, fontweight="bold",
+			)
+
+		plt.tight_layout()
+		if save:
+			fig.savefig(filepath, dpi=150)
+			print(f"  Imagen guardada: {filepath}")
+		if show:
+			plt.show()
+		plt.close(fig)
+
+	def _save_txt(res: dict, filepath: Path, title: str, counts_d: dict):
+		if not res:
+			return
+		with open(filepath, "w", encoding="utf-8") as f:
+			f.write(f"{title}\n")
+			f.write(f"Rondas: {n_rounds:,}\n")
+			f.write(f"{'Intervalo':<18}{'Count':>8}{'Victorias':>12}{'%':>10}\n")
+			f.write("-" * 48 + "\n")
+			for label, pct in res.items():
+				wins_count = int(round(pct / 100 * n_rounds))
+				count_val = counts_d.get(label, 0)
+				f.write(f"{label:<18}{count_val:>8,}{wins_count:>12,}{pct:>9.2f}%\n")
+		print(f"  Datos guardados: {filepath}")
+
+	# ── Simulación ──────────────────────────────────────────────────────
+	print(f"\n{'='*60}")
+	print(f"Monte Carlo – Intervalos de 2 h global ({n_rounds:,} rondas)")
+	print(f"{'='*60}")
+
+	all_results: dict = {}
+
+	for bucket_name, bucket_cond, bucket_label in duration_buckets:
+		print(f"\n■ Bucket {bucket_label}")
+		tmp_bucket = tmp[bucket_cond(tmp["dur_s"])].copy()
+		if tmp_bucket.empty:
+			print(f"  Sin datos para {bucket_label}; omitido.")
+			continue
+
+		# Agrupar por intervalo de 2 h – notación (a, b]
+		interval_videos: dict[str, np.ndarray] = {}
+		for (lo, hi), hlabel in zip(hour_bins, hour_labels):
+			if lo == 0:
+				mask = (tmp_bucket["hour_frac"] >= lo) & (tmp_bucket["hour_frac"] <= hi)
+			else:
+				mask = (tmp_bucket["hour_frac"] > lo) & (tmp_bucket["hour_frac"] <= hi)
+			varr = tmp_bucket.loc[mask, "views"].values
+			if len(varr) > 0:
+				interval_videos[hlabel] = varr
+
+		if len(interval_videos) < 2:
+			print(f"  Menos de 2 intervalos con videos; omitido.")
+			continue
+
+		labels = list(interval_videos.keys())
+		arrays = [interval_videos[l] for l in labels]
+		n_int = len(labels)
+		counts = {labels[i]: len(arrays[i]) for i in range(n_int)}
+
+		# Simulación vectorizada
+		rng = np.random.default_rng(seed)
+		wins = np.zeros(n_int, dtype=np.int64)
+
+		idx_matrix = [rng.integers(0, len(arr), size=n_rounds) for arr in arrays]
+		views_matrix = np.column_stack(
+			[arr[idx] for arr, idx in zip(arrays, idx_matrix)]
+		)
+
+		winners = np.argmax(views_matrix, axis=1)
+		for i in range(n_int):
+			wins[i] = np.sum(winners == i)
+
+		win_pct = wins / n_rounds * 100
+		results = {labels[i]: float(win_pct[i]) for i in range(n_int)}
+
+		# Guardar imagen y txt
+		fname = f"monte_carlo_hourly_2h_{bucket_name}"
+		_plot(
+			results,
+			f"Monte Carlo – Victorias por franja horaria ({bucket_label})\n{n_rounds:,} rondas",
+			output_dir / f"{fname}.png",
+			counts,
+		)
+		_save_txt(
+			results,
+			output_dir / f"{fname}.txt",
+			f"Monte Carlo – Franja horaria ({bucket_label})",
+			counts,
+		)
+
+		all_results[bucket_name] = results
+
+	print(f"{'='*60}\n")
+	return all_results
+
 
 # Función principal para ejecutar el análisis
 def main() -> None:
@@ -4087,6 +4573,9 @@ def main() -> None:
 	monte_carlo_title_words(df, output_dir=random_dir)
 	monte_carlo_tag_count(df, output_dir=random_dir)
 	monte_carlo_description_length(df, output_dir=random_dir)
+	monte_carlo_hourly_by_weekday(df, output_dir=random_dir)
+	monte_carlo_hourly_2h(df, output_dir=random_dir)
+
 
 
 if __name__ == '__main__':
