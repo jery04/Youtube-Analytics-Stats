@@ -5,6 +5,7 @@ from pathlib import Path
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
+import numpy as np
 
 # Función para cargar el CSV de videos
 def load_csv(path: str) -> pd.DataFrame:
@@ -1591,12 +1592,12 @@ def analyze_tags_intervals(df, root=None, output_dir=None, file_suffix=None, can
 			tags_col = c
 			break
 	if tags_col is None:
-		# Buscar columna "tags" y contar elementos
+		# Buscar columna "tags" y contar elementos (separados por "|")
 		for c in df.columns:
 			if re.search(r'^tags$', c, re.I):
 				df['__num_tags'] = df[c].apply(
 					lambda x: 0 if pd.isna(x) or str(x).strip() in ('', '[]', 'nan')
-					else len(str(x).split(','))
+					else len([t for t in str(x).split('|') if t.strip()])
 				)
 				tags_col = '__num_tags'
 				break
@@ -2859,6 +2860,1131 @@ def plot_category_pie(df=None, csv_path=None, root=None, output_dir=None, file_s
 
 	return pd.DataFrame({'category': counts.index, 'count': counts.values, 'percent': perc.values})
 
+# Simulación Monte Carlo para comparar intervalos de duración según viewCount
+def monte_carlo_duration_intervals(
+	df: pd.DataFrame,
+	output_dir: str | None = None,
+	n_rounds: int = 200_000,
+	seed: int = 42,
+	save: bool = True,
+	show: bool = False,
+) -> dict:
+	"""
+	Simulación Monte Carlo por intervalos de duración.
+
+	Para cada ronda se elige un video aleatorio de cada intervalo de duración;
+	el intervalo cuyo video seleccionado tiene el mayor viewCount gana esa ronda.
+	Se repite `n_rounds` veces y se genera un histograma con el porcentaje de
+	victorias de cada intervalo.
+
+	Se generan dos simulaciones:
+	  1) Intervalos en segundos: [0-5], [5-10], …, [50-60]
+	  2) Intervalos en minutos: [1-2], [2-3], …, [15-16]
+
+	Los resultados se guardan en `output_dir` (por defecto outputs/Random).
+	"""
+
+	if output_dir is None:
+		root = Path(__file__).resolve().parents[1]
+		output_dir = root / "outputs" / "Random"
+	else:
+		output_dir = Path(output_dir)
+	output_dir.mkdir(parents=True, exist_ok=True)
+
+	# ── Resolver columna de duración en segundos ────────────────────────
+	duration_candidates = [
+		"durationSeconds", "duracion_segundos", "duration_seconds",
+		"duration_sec", "length_seconds",
+	]
+	dur_col = None
+	for c in duration_candidates:
+		if c in df.columns:
+			dur_col = c
+			break
+	if dur_col is None:
+		for c in df.columns:
+			if re.search(r'duraci|duration|length', c, re.I):
+				dur_col = c
+				break
+	if dur_col is None:
+		print("monte_carlo: No se encontró columna de duración.")
+		return {}
+
+	# ── Resolver columna de vistas ──────────────────────────────────────
+	view_candidates = [
+		"viewCount", "views", "vistas", "visualizaciones",
+		"view_count", "reproducciones",
+	]
+	view_col = None
+	for c in view_candidates:
+		if c in df.columns:
+			view_col = c
+			break
+	if view_col is None:
+		for c in df.columns:
+			if re.search(r'view|vista|visual|reproduc', c, re.I):
+				view_col = c
+				break
+	if view_col is None:
+		print("monte_carlo: No se encontró columna de vistas/viewCount.")
+		return {}
+
+	# ── Preparar datos ──────────────────────────────────────────────────
+	tmp = df[[dur_col, view_col]].copy()
+	tmp["dur_s"] = pd.to_numeric(tmp[dur_col], errors="coerce")
+	tmp["views"] = pd.to_numeric(tmp[view_col], errors="coerce")
+	tmp = tmp.dropna(subset=["dur_s", "views"])
+	tmp["dur_s"] = tmp["dur_s"].astype(float)
+	tmp["views"] = tmp["views"].astype(int)
+
+	# ── Definir intervalos ──────────────────────────────────────────────
+	second_bins = [(0, 5), (5, 10), (10, 15), (15, 20), (20, 30), (30, 40), (40, 50), (50, 60)]
+	minute_bins = [(m, m + 1) for m in range(1, 16)]  # [1-2], [2-3], …, [15-16]
+
+	# ── Función interna de simulación ───────────────────────────────────
+	def _run_simulation(bins_def, unit="s"):
+		"""
+		bins_def: lista de tuplas (lo, hi) en la unidad indicada.
+		unit: 's' para segundos, 'm' para minutos.
+		Retorna dict {label: win_pct}.
+		"""
+		# Agrupar videos por intervalo
+		interval_videos: dict[str, np.ndarray] = {}  # label -> array de views
+		for lo, hi in bins_def:
+			if unit == "s":
+				mask = (tmp["dur_s"] >= lo) & (tmp["dur_s"] < hi)
+				label = f"[{lo}-{hi}]s"
+			else:  # minutos
+				mask = (tmp["dur_s"] >= lo * 60) & (tmp["dur_s"] < hi * 60)
+				label = f"[{lo}-{hi}]min"
+			views_arr = tmp.loc[mask, "views"].values
+			if len(views_arr) > 0:
+				interval_videos[label] = views_arr
+
+		if len(interval_videos) < 2:
+			print(f"monte_carlo ({unit}): Menos de 2 intervalos con videos; se omite.")
+			return {}, {}
+
+		labels = list(interval_videos.keys())
+		arrays = [interval_videos[l] for l in labels]
+		n_intervals = len(labels)
+
+		# Contar videos por intervalo
+		counts = {labels[i]: len(arrays[i]) for i in range(n_intervals)}
+
+		# Simulación vectorizada con NumPy para velocidad
+		rng = np.random.default_rng(seed)
+		wins = np.zeros(n_intervals, dtype=np.int64)
+
+		# Generar índices aleatorios para todas las rondas de una vez
+		idx_matrix = [rng.integers(0, len(arr), size=n_rounds) for arr in arrays]
+		# Obtener vistas correspondientes
+		views_matrix = np.column_stack(
+			[arr[idx] for arr, idx in zip(arrays, idx_matrix)]
+		)  # shape: (n_rounds, n_intervals)
+
+		# Determinar ganador de cada ronda (mayor viewCount)
+		winners = np.argmax(views_matrix, axis=1)  # shape: (n_rounds,)
+		for i in range(n_intervals):
+			wins[i] = np.sum(winners == i)
+
+		win_pct = wins / n_rounds * 100
+		return {labels[i]: float(win_pct[i]) for i in range(n_intervals)}, counts
+
+	# ── Función interna para generar histograma ─────────────────────────
+	def _plot_histogram(results: dict, title: str, filename: str):
+		if not results:
+			return
+		labels_sorted = list(results.keys())
+		pcts = [results[l] for l in labels_sorted]
+
+		fig, ax = plt.subplots(figsize=(12, 6))
+		bars = ax.bar(
+			range(len(labels_sorted)), pcts,
+			color=sns.color_palette("viridis", len(labels_sorted)),
+			edgecolor="black",
+		)
+		ax.set_xticks(range(len(labels_sorted)))
+		ax.set_xticklabels(labels_sorted, rotation=30, ha="right", fontsize=10)
+		ax.set_ylabel("% de victorias", fontsize=12)
+		ax.set_xlabel("Intervalo de duración", fontsize=12)
+		ax.set_title(title, fontsize=14, fontweight="bold")
+
+		# Etiquetas sobre las barras
+		for bar, pct in zip(bars, pcts):
+			ax.text(
+				bar.get_x() + bar.get_width() / 2,
+				bar.get_height() + 0.3,
+				f"{pct:.2f}%",
+				ha="center", va="bottom", fontsize=9, fontweight="bold",
+			)
+
+		plt.tight_layout()
+		if save:
+			img_path = output_dir / f"{filename}.png"
+			fig.savefig(img_path, dpi=150)
+			print(f"Imagen guardada: {img_path}")
+		if show:
+			plt.show()
+		plt.close(fig)
+
+	# ── Función interna para guardar TXT ────────────────────────────────
+	def _save_txt(results: dict, filename: str, title: str, counts: dict | None = None):
+		if not results:
+			return
+		txt_path = output_dir / f"{filename}.txt"
+		with open(txt_path, "w", encoding="utf-8") as f:
+			f.write(f"{title}\n")
+			f.write(f"Rondas: {n_rounds:,}\n")
+			f.write(f"{'Intervalo':<18}{'Count':>8}{'Victorias':>12}{'%':>10}\n")
+			f.write("-" * 48 + "\n")
+			for label, pct in results.items():
+				wins_count = int(round(pct / 100 * n_rounds))
+				count_val = counts.get(label, 0) if counts else 0
+				f.write(f"{label:<18}{count_val:>8,}{wins_count:>12,}{pct:>9.2f}%\n")
+		print(f"Datos guardados: {txt_path}")
+
+	# ── Ejecutar simulaciones ───────────────────────────────────────────
+	print(f"\n{'='*60}")
+	print(f"Monte Carlo – Intervalos de duración ({n_rounds:,} rondas)")
+	print(f"{'='*60}")
+
+	results_all = {}
+
+	# 1) Segundos
+	print("\n→ Simulación con intervalos en SEGUNDOS...")
+	res_sec, counts_sec = _run_simulation(second_bins, unit="s")
+	if res_sec:
+		_plot_histogram(
+			res_sec,
+			f"Monte Carlo – Victorias por intervalo de duración (segundos)\n{n_rounds:,} rondas",
+			"monte_carlo_seconds",
+		)
+		_save_txt(res_sec, "monte_carlo_seconds", "Monte Carlo – Intervalos en Segundos", counts=counts_sec)
+		results_all["seconds"] = res_sec
+
+	# 2) Minutos
+	print("→ Simulación con intervalos en MINUTOS...")
+	res_min, counts_min = _run_simulation(minute_bins, unit="m")
+	if res_min:
+		_plot_histogram(
+			res_min,
+			f"Monte Carlo – Victorias por intervalo de duración (minutos)\n{n_rounds:,} rondas",
+			"monte_carlo_minutes",
+		)
+		_save_txt(res_min, "monte_carlo_minutes", "Monte Carlo – Intervalos en Minutos", counts=counts_min)
+		results_all["minutes"] = res_min
+
+	print(f"{'='*60}\n")
+	return results_all
+
+# Simulación Monte Carlo para comparar intervalos de duración según viewCount
+def monte_carlo_weekdays(
+	df: pd.DataFrame,
+	output_dir: str | None = None,
+	n_rounds: int = 200_000,
+	seed: int = 42,
+	save: bool = True,
+	show: bool = False,
+) -> dict:
+	"""
+	Simulación Monte Carlo por día de la semana.
+
+	Para cada ronda se elige un video aleatorio de cada día de la semana
+	(lunes a domingo); el día cuyo video seleccionado tiene el mayor
+	viewCount gana esa ronda.  Se repite `n_rounds` veces y se genera un
+	histograma con el porcentaje de victorias de cada día.
+
+	Los resultados se guardan en `output_dir` (por defecto outputs/Random).
+	"""
+
+	if output_dir is None:
+		root = Path(__file__).resolve().parents[1]
+		output_dir = root / "outputs" / "Random"
+	else:
+		output_dir = Path(output_dir)
+	output_dir.mkdir(parents=True, exist_ok=True)
+
+	# ── Resolver columna de fecha/hora ──────────────────────────────────
+	date_candidates = [
+		"publishedAt", "published_at", "fecha_publicacion",
+		"fecha", "date", "upload_date",
+	]
+	date_col = None
+	for c in date_candidates:
+		if c in df.columns:
+			date_col = c
+			break
+	if date_col is None:
+		for c in df.columns:
+			if re.search(r'publish|upload|date|time|fecha|publica|publicación|publicacion', c, re.I):
+				date_col = c
+				break
+	if date_col is None:
+		print("monte_carlo_weekdays: No se encontró columna de fecha/hora.")
+		return {}
+
+	# ── Resolver columna de vistas ──────────────────────────────────────
+	view_candidates = [
+		"viewCount", "views", "vistas", "visualizaciones",
+		"view_count", "reproducciones",
+	]
+	view_col = None
+	for c in view_candidates:
+		if c in df.columns:
+			view_col = c
+			break
+	if view_col is None:
+		for c in df.columns:
+			if re.search(r'view|vista|visual|reproduc', c, re.I):
+				view_col = c
+				break
+	if view_col is None:
+		print("monte_carlo_weekdays: No se encontró columna de vistas/viewCount.")
+		return {}
+
+	# ── Resolver columna de duración en segundos ───────────────────────
+	duration_candidates = [
+		"durationSeconds", "duracion_segundos", "duration_seconds",
+		"duration_sec", "length_seconds",
+	]
+	dur_col = None
+	for c in duration_candidates:
+		if c in df.columns:
+			dur_col = c
+			break
+	if dur_col is None:
+		for c in df.columns:
+			if re.search(r'duraci|duration|length', c, re.I):
+				dur_col = c
+				break
+	if dur_col is None:
+		print("monte_carlo_weekdays: No se encontró columna de duración.")
+		return {}
+
+	# ── Preparar datos ──────────────────────────────────────────────────
+	tmp = df[[date_col, view_col, dur_col]].copy()
+	try:
+		tmp[date_col] = pd.to_datetime(tmp[date_col], format='mixed', errors='coerce')
+	except Exception:
+		tmp[date_col] = pd.to_datetime(tmp[date_col].astype(str), format='mixed', errors='coerce')
+	tmp["views"] = pd.to_numeric(tmp[view_col], errors="coerce")
+	tmp["dur_s"] = pd.to_numeric(tmp[dur_col], errors="coerce")
+	tmp = tmp.dropna(subset=[date_col, "views", "dur_s"])
+	if tmp.empty:
+		print("monte_carlo_weekdays: No hay datos válidos con fechas, vistas y duración.")
+		return {}
+	tmp["views"] = tmp["views"].astype(int)
+	tmp["dur_s"] = tmp["dur_s"].astype(float)
+	tmp["weekday"] = tmp[date_col].dt.dayofweek  # Monday=0 .. Sunday=6
+
+	weekday_labels = ['lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado', 'domingo']
+
+	# ── Definir buckets de duración ─────────────────────────────────────
+	duration_buckets = [
+		("le1min",  lambda s: s <= 60,              "≤1min"),
+		("1_16min", lambda s: (s > 60) & (s <= 960), "1-16min"),
+	]
+
+	# ── Histograma ──────────────────────────────────────────────────────
+	def _plot_histogram(res: dict, title: str, filename: str):
+		if not res:
+			return
+		lbls = list(res.keys())
+		pcts = [res[l] for l in lbls]
+
+		fig, ax = plt.subplots(figsize=(12, 6))
+		bars = ax.bar(
+			range(len(lbls)), pcts,
+			color=sns.color_palette("viridis", len(lbls)),
+			edgecolor="black",
+		)
+		ax.set_xticks(range(len(lbls)))
+		ax.set_xticklabels(lbls, rotation=30, ha="right", fontsize=10)
+		ax.set_ylabel("% de victorias", fontsize=12)
+		ax.set_xlabel("Día de la semana", fontsize=12)
+		ax.set_title(title, fontsize=14, fontweight="bold")
+
+		for bar, pct in zip(bars, pcts):
+			ax.text(
+				bar.get_x() + bar.get_width() / 2,
+				bar.get_height() + 0.3,
+				f"{pct:.2f}%",
+				ha="center", va="bottom", fontsize=9, fontweight="bold",
+			)
+
+		plt.tight_layout()
+		if save:
+			img_path = output_dir / f"{filename}.png"
+			fig.savefig(img_path, dpi=150)
+			print(f"Imagen guardada: {img_path}")
+		if show:
+			plt.show()
+		plt.close(fig)
+
+	# ── Guardar TXT ─────────────────────────────────────────────────────
+	def _save_txt(res: dict, filename: str, title: str, counts: dict | None = None):
+		if not res:
+			return
+		txt_path = output_dir / f"{filename}.txt"
+		with open(txt_path, "w", encoding="utf-8") as f:
+			f.write(f"{title}\n")
+			f.write(f"Rondas: {n_rounds:,}\n")
+			f.write(f"{'Día':<18}{'Count':>8}{'Victorias':>12}{'%':>10}\n")
+			f.write("-" * 48 + "\n")
+			for label, pct in res.items():
+				wins_count = int(round(pct / 100 * n_rounds))
+				count_val = counts.get(label, 0) if counts else 0
+				f.write(f"{label:<18}{count_val:>8,}{wins_count:>12,}{pct:>9.2f}%\n")
+		print(f"Datos guardados: {txt_path}")
+
+	# ── Ejecutar simulación por cada bucket de duración ─────────────────
+	print(f"\n{'='*60}")
+	print(f"Monte Carlo – Días de la semana ({n_rounds:,} rondas)")
+	print(f"{'='*60}")
+
+	all_results = {}
+
+	for bucket_name, bucket_cond, bucket_label in duration_buckets:
+		print(f"\n→ Simulación para videos {bucket_label}...")
+		tmp_filtered = tmp[bucket_cond(tmp["dur_s"])].copy()
+
+		if tmp_filtered.empty:
+			print(f"  Sin datos para bucket {bucket_label}; omitido.")
+			continue
+
+		# Agrupar videos por día de la semana
+		weekday_videos: dict[str, np.ndarray] = {}
+		for idx, label in enumerate(weekday_labels):
+			views_arr = tmp_filtered.loc[tmp_filtered["weekday"] == idx, "views"].values
+			if len(views_arr) > 0:
+				weekday_videos[label] = views_arr
+
+		if len(weekday_videos) < 2:
+			print(f"  monte_carlo_weekdays ({bucket_label}): Menos de 2 días con videos; omitido.")
+			continue
+
+		labels = list(weekday_videos.keys())
+		arrays = [weekday_videos[l] for l in labels]
+		n_days = len(labels)
+
+		# Simulación vectorizada
+		rng = np.random.default_rng(seed)
+		wins = np.zeros(n_days, dtype=np.int64)
+
+		idx_matrix = [rng.integers(0, len(arr), size=n_rounds) for arr in arrays]
+		views_matrix = np.column_stack(
+			[arr[idx] for arr, idx in zip(arrays, idx_matrix)]
+		)  # shape: (n_rounds, n_days)
+
+		winners = np.argmax(views_matrix, axis=1)
+		for i in range(n_days):
+			wins[i] = np.sum(winners == i)
+
+		win_pct = wins / n_rounds * 100
+		results = {labels[i]: float(win_pct[i]) for i in range(n_days)}
+
+		weekday_counts = {label: len(arr) for label, arr in weekday_videos.items()}
+
+		_plot_histogram(
+			results,
+			f"Monte Carlo – Victorias por día de la semana ({bucket_label})\n{n_rounds:,} rondas",
+			f"monte_carlo_weekdays_{bucket_name}",
+		)
+		_save_txt(
+			results,
+			f"monte_carlo_weekdays_{bucket_name}",
+			f"Monte Carlo – Días de la semana ({bucket_label})",
+			counts=weekday_counts,
+		)
+
+		all_results[bucket_name] = results
+
+	print(f"{'='*60}\n")
+	return all_results
+
+# Simulación Monte Carlo por número de palabras en el título
+def monte_carlo_title_words(
+	df: pd.DataFrame,
+	output_dir: str | None = None,
+	n_rounds: int = 200_000,
+	seed: int = 42,
+	save: bool = True,
+	show: bool = False,
+) -> dict:
+	"""
+	Simulación Monte Carlo por número de palabras en el título.
+
+	Para cada ronda se elige un video aleatorio de cada intervalo de
+	palabras en el título; el intervalo cuyo video seleccionado tiene el
+	mayor viewCount gana esa ronda. Se repite `n_rounds` veces y se genera
+	un histograma con el porcentaje de victorias de cada intervalo.
+
+	Intervalos: 1-3, 4-6, 7-9, 10-12, 13-15, 16-18, 19-21, 22-24 palabras.
+
+	Se generan dos simulaciones separadas por duración:
+	  1) Videos ≤1 min
+	  2) Videos 1-16 min
+	"""
+
+	if output_dir is None:
+		root = Path(__file__).resolve().parents[1]
+		output_dir = root / "outputs" / "Random"
+	else:
+		output_dir = Path(output_dir)
+	output_dir.mkdir(parents=True, exist_ok=True)
+
+	# ── Resolver columna de título ──────────────────────────────────────
+	title_col = None
+	for c in ["title", "titulo", "título"]:
+		if c in df.columns:
+			title_col = c
+			break
+	if title_col is None:
+		for c in df.columns:
+			if re.search(r'title|titulo|título', c, re.I):
+				title_col = c
+				break
+	if title_col is None:
+		print("monte_carlo_title_words: No se encontró columna de título.")
+		return {}
+
+	# ── Resolver columna de vistas ──────────────────────────────────────
+	view_candidates = [
+		"viewCount", "views", "vistas", "visualizaciones",
+		"view_count", "reproducciones",
+	]
+	view_col = None
+	for c in view_candidates:
+		if c in df.columns:
+			view_col = c
+			break
+	if view_col is None:
+		for c in df.columns:
+			if re.search(r'view|vista|visual|reproduc', c, re.I):
+				view_col = c
+				break
+	if view_col is None:
+		print("monte_carlo_title_words: No se encontró columna de vistas/viewCount.")
+		return {}
+
+	# ── Resolver columna de duración en segundos ───────────────────────
+	duration_candidates = [
+		"durationSeconds", "duracion_segundos", "duration_seconds",
+		"duration_sec", "length_seconds",
+	]
+	dur_col = None
+	for c in duration_candidates:
+		if c in df.columns:
+			dur_col = c
+			break
+	if dur_col is None:
+		for c in df.columns:
+			if re.search(r'duraci|duration|length', c, re.I):
+				dur_col = c
+				break
+	if dur_col is None:
+		print("monte_carlo_title_words: No se encontró columna de duración.")
+		return {}
+
+	# ── Preparar datos ──────────────────────────────────────────────────
+	tmp = df[[title_col, view_col, dur_col]].copy()
+	tmp["views"] = pd.to_numeric(tmp[view_col], errors="coerce")
+	tmp["dur_s"] = pd.to_numeric(tmp[dur_col], errors="coerce")
+	tmp = tmp.dropna(subset=["views", "dur_s"])
+	tmp["views"] = tmp["views"].astype(int)
+	tmp["dur_s"] = tmp["dur_s"].astype(float)
+	tmp["word_count"] = tmp[title_col].astype(str).str.split().str.len().fillna(0).astype(int)
+
+	# ── Definir intervalos de palabras ──────────────────────────────────
+	word_bins = [(1, 3), (4, 6), (7, 9), (10, 12), (13, 15), (16, 18), (19, 21), (22, 24)]
+
+	# ── Definir buckets de duración ─────────────────────────────────────
+	duration_buckets = [
+		("le1min",  lambda s: s <= 60,              "≤1min"),
+		("1_16min", lambda s: (s > 60) & (s <= 960), "1-16min"),
+	]
+
+	# ── Histograma ──────────────────────────────────────────────────────
+	def _plot_histogram(res: dict, title: str, filename: str):
+		if not res:
+			return
+		lbls = list(res.keys())
+		pcts = [res[l] for l in lbls]
+
+		fig, ax = plt.subplots(figsize=(12, 6))
+		bars = ax.bar(
+			range(len(lbls)), pcts,
+			color=sns.color_palette("viridis", len(lbls)),
+			edgecolor="black",
+		)
+		ax.set_xticks(range(len(lbls)))
+		ax.set_xticklabels(lbls, rotation=30, ha="right", fontsize=10)
+		ax.set_ylabel("% de victorias", fontsize=12)
+		ax.set_xlabel("Nº de palabras en el título", fontsize=12)
+		ax.set_title(title, fontsize=14, fontweight="bold")
+
+		for bar, pct in zip(bars, pcts):
+			ax.text(
+				bar.get_x() + bar.get_width() / 2,
+				bar.get_height() + 0.3,
+				f"{pct:.2f}%",
+				ha="center", va="bottom", fontsize=9, fontweight="bold",
+			)
+
+		plt.tight_layout()
+		if save:
+			img_path = output_dir / f"{filename}.png"
+			fig.savefig(img_path, dpi=150)
+			print(f"Imagen guardada: {img_path}")
+		if show:
+			plt.show()
+		plt.close(fig)
+
+	# ── Guardar TXT ─────────────────────────────────────────────────────
+	def _save_txt(res: dict, filename: str, title: str, counts_d: dict | None = None):
+		if not res:
+			return
+		txt_path = output_dir / f"{filename}.txt"
+		with open(txt_path, "w", encoding="utf-8") as f:
+			f.write(f"{title}\n")
+			f.write(f"Rondas: {n_rounds:,}\n")
+			f.write(f"{'Intervalo':<18}{'Count':>8}{'Victorias':>12}{'%':>10}\n")
+			f.write("-" * 48 + "\n")
+			for label, pct in res.items():
+				wins_count = int(round(pct / 100 * n_rounds))
+				count_val = counts_d.get(label, 0) if counts_d else 0
+				f.write(f"{label:<18}{count_val:>8,}{wins_count:>12,}{pct:>9.2f}%\n")
+		print(f"Datos guardados: {txt_path}")
+
+	# ── Ejecutar simulación por cada bucket de duración ─────────────────
+	print(f"\n{'='*60}")
+	print(f"Monte Carlo – Nº palabras en título ({n_rounds:,} rondas)")
+	print(f"{'='*60}")
+
+	all_results = {}
+
+	for bucket_name, bucket_cond, bucket_label in duration_buckets:
+		print(f"\n→ Simulación para videos {bucket_label}...")
+		tmp_filtered = tmp[bucket_cond(tmp["dur_s"])].copy()
+
+		if tmp_filtered.empty:
+			print(f"  Sin datos para bucket {bucket_label}; omitido.")
+			continue
+
+		# Agrupar videos por intervalo de palabras
+		interval_videos: dict[str, np.ndarray] = {}
+		for lo, hi in word_bins:
+			mask = (tmp_filtered["word_count"] >= lo) & (tmp_filtered["word_count"] <= hi)
+			label = f"[{lo}-{hi}]"
+			views_arr = tmp_filtered.loc[mask, "views"].values
+			if len(views_arr) > 0:
+				interval_videos[label] = views_arr
+
+		if len(interval_videos) < 2:
+			print(f"  monte_carlo_title_words ({bucket_label}): Menos de 2 intervalos con videos; omitido.")
+			continue
+
+		labels = list(interval_videos.keys())
+		arrays = [interval_videos[l] for l in labels]
+		n_intervals = len(labels)
+		counts = {labels[i]: len(arrays[i]) for i in range(n_intervals)}
+
+		# Simulación vectorizada
+		rng = np.random.default_rng(seed)
+		wins = np.zeros(n_intervals, dtype=np.int64)
+
+		idx_matrix = [rng.integers(0, len(arr), size=n_rounds) for arr in arrays]
+		views_matrix = np.column_stack(
+			[arr[idx] for arr, idx in zip(arrays, idx_matrix)]
+		)
+
+		winners = np.argmax(views_matrix, axis=1)
+		for i in range(n_intervals):
+			wins[i] = np.sum(winners == i)
+
+		win_pct = wins / n_rounds * 100
+		results = {labels[i]: float(win_pct[i]) for i in range(n_intervals)}
+
+		_plot_histogram(
+			results,
+			f"Monte Carlo – Victorias por nº de palabras en título ({bucket_label})\n{n_rounds:,} rondas",
+			f"monte_carlo_title_words_{bucket_name}",
+		)
+		_save_txt(
+			results,
+			f"monte_carlo_title_words_{bucket_name}",
+			f"Monte Carlo – Nº de palabras en el título ({bucket_label})",
+			counts_d=counts,
+		)
+
+		all_results[bucket_name] = results
+
+	print(f"{'='*60}\n")
+	return all_results
+
+# Simulación Monte Carlo por número de tags
+def monte_carlo_tag_count(
+	df: pd.DataFrame,
+	output_dir: str | None = None,
+	n_rounds: int = 200_000,
+	seed: int = 42,
+	save: bool = True,
+	show: bool = False,
+) -> dict:
+	"""
+	Simulación Monte Carlo por cantidad de tags.
+
+	Para cada ronda se elige un video aleatorio de cada intervalo de
+	cantidad de tags; el intervalo cuyo video seleccionado tiene el mayor
+	viewCount gana esa ronda. Se repite `n_rounds` veces y se genera un
+	histograma con el porcentaje de victorias de cada intervalo.
+
+	Intervalos: 0-5, 6-10, 11-15, 16-20, 21-30, 31-40, 41-60 tags.
+	Los tags se cuentan separando la columna "tags" por el carácter "|".
+
+	Se generan dos simulaciones separadas por duración:
+	  1) Videos ≤1 min
+	  2) Videos 1-16 min
+	"""
+
+	if output_dir is None:
+		root = Path(__file__).resolve().parents[1]
+		output_dir = root / "outputs" / "Random"
+	else:
+		output_dir = Path(output_dir)
+	output_dir.mkdir(parents=True, exist_ok=True)
+
+	# ── Resolver columna de tags ────────────────────────────────────────
+	tag_col = None
+	for c in ["tags", "etiquetas", "keywords"]:
+		if c in df.columns:
+			tag_col = c
+			break
+	if tag_col is None:
+		for c in df.columns:
+			if re.search(r'tag|etiqueta|keyword', c, re.I):
+				tag_col = c
+				break
+	if tag_col is None:
+		print("monte_carlo_tag_count: No se encontró columna de tags.")
+		return {}
+
+	# ── Resolver columna de vistas ──────────────────────────────────────
+	view_candidates = [
+		"viewCount", "views", "vistas", "visualizaciones",
+		"view_count", "reproducciones",
+	]
+	view_col = None
+	for c in view_candidates:
+		if c in df.columns:
+			view_col = c
+			break
+	if view_col is None:
+		for c in df.columns:
+			if re.search(r'view|vista|visual|reproduc', c, re.I):
+				view_col = c
+				break
+	if view_col is None:
+		print("monte_carlo_tag_count: No se encontró columna de vistas/viewCount.")
+		return {}
+
+	# ── Resolver columna de duración en segundos ───────────────────────
+	duration_candidates = [
+		"durationSeconds", "duracion_segundos", "duration_seconds",
+		"duration_sec", "length_seconds",
+	]
+	dur_col = None
+	for c in duration_candidates:
+		if c in df.columns:
+			dur_col = c
+			break
+	if dur_col is None:
+		for c in df.columns:
+			if re.search(r'duraci|duration|length', c, re.I):
+				dur_col = c
+				break
+	if dur_col is None:
+		print("monte_carlo_tag_count: No se encontró columna de duración.")
+		return {}
+
+	# ── Preparar datos ──────────────────────────────────────────────────
+	tmp = df[[tag_col, view_col, dur_col]].copy()
+	tmp["views"] = pd.to_numeric(tmp[view_col], errors="coerce")
+	tmp["dur_s"] = pd.to_numeric(tmp[dur_col], errors="coerce")
+	tmp = tmp.dropna(subset=["views", "dur_s"])
+	tmp["views"] = tmp["views"].astype(int)
+	tmp["dur_s"] = tmp["dur_s"].astype(float)
+
+	# Contar tags: separar por "|" y contar elementos
+	def _count_tags(val):
+		if pd.isna(val) or str(val).strip() == "":
+			return 0
+		return len(str(val).split("|"))
+
+	tmp["tag_count"] = tmp[tag_col].apply(_count_tags)
+
+	# ── Definir intervalos de tags ──────────────────────────────────────
+	tag_bins = [(0, 5), (6, 10), (11, 15), (16, 20), (21, 30), (31, 40), (41, 60)]
+
+	# ── Definir buckets de duración ─────────────────────────────────────
+	duration_buckets = [
+		("le1min",  lambda s: s <= 60,              "≤1min"),
+		("1_16min", lambda s: (s > 60) & (s <= 960), "1-16min"),
+	]
+
+	# ── Histograma ──────────────────────────────────────────────────────
+	def _plot_histogram(res: dict, title: str, filename: str):
+		if not res:
+			return
+		lbls = list(res.keys())
+		pcts = [res[l] for l in lbls]
+
+		fig, ax = plt.subplots(figsize=(12, 6))
+		bars = ax.bar(
+			range(len(lbls)), pcts,
+			color=sns.color_palette("viridis", len(lbls)),
+			edgecolor="black",
+		)
+		ax.set_xticks(range(len(lbls)))
+		ax.set_xticklabels(lbls, rotation=30, ha="right", fontsize=10)
+		ax.set_ylabel("% de victorias", fontsize=12)
+		ax.set_xlabel("Nº de tags", fontsize=12)
+		ax.set_title(title, fontsize=14, fontweight="bold")
+
+		for bar, pct in zip(bars, pcts):
+			ax.text(
+				bar.get_x() + bar.get_width() / 2,
+				bar.get_height() + 0.3,
+				f"{pct:.2f}%",
+				ha="center", va="bottom", fontsize=9, fontweight="bold",
+			)
+
+		plt.tight_layout()
+		if save:
+			img_path = output_dir / f"{filename}.png"
+			fig.savefig(img_path, dpi=150)
+			print(f"Imagen guardada: {img_path}")
+		if show:
+			plt.show()
+		plt.close(fig)
+
+	# ── Guardar TXT ─────────────────────────────────────────────────────
+	def _save_txt(res: dict, filename: str, title: str, counts_d: dict | None = None):
+		if not res:
+			return
+		txt_path = output_dir / f"{filename}.txt"
+		with open(txt_path, "w", encoding="utf-8") as f:
+			f.write(f"{title}\n")
+			f.write(f"Rondas: {n_rounds:,}\n")
+			f.write(f"{'Intervalo':<18}{'Count':>8}{'Victorias':>12}{'%':>10}\n")
+			f.write("-" * 48 + "\n")
+			for label, pct in res.items():
+				wins_count = int(round(pct / 100 * n_rounds))
+				count_val = counts_d.get(label, 0) if counts_d else 0
+				f.write(f"{label:<18}{count_val:>8,}{wins_count:>12,}{pct:>9.2f}%\n")
+		print(f"Datos guardados: {txt_path}")
+
+	# ── Ejecutar simulación por cada bucket de duración ─────────────────
+	print(f"\n{'='*60}")
+	print(f"Monte Carlo – Nº de tags ({n_rounds:,} rondas)")
+	print(f"{'='*60}")
+
+	all_results = {}
+
+	for bucket_name, bucket_cond, bucket_label in duration_buckets:
+		print(f"\n→ Simulación para videos {bucket_label}...")
+		tmp_filtered = tmp[bucket_cond(tmp["dur_s"])].copy()
+
+		if tmp_filtered.empty:
+			print(f"  Sin datos para bucket {bucket_label}; omitido.")
+			continue
+
+		# Agrupar videos por intervalo de tags
+		interval_videos: dict[str, np.ndarray] = {}
+		for lo, hi in tag_bins:
+			mask = (tmp_filtered["tag_count"] >= lo) & (tmp_filtered["tag_count"] <= hi)
+			label = f"[{lo}-{hi}]"
+			views_arr = tmp_filtered.loc[mask, "views"].values
+			if len(views_arr) > 0:
+				interval_videos[label] = views_arr
+
+		if len(interval_videos) < 2:
+			print(f"  monte_carlo_tag_count ({bucket_label}): Menos de 2 intervalos con videos; omitido.")
+			continue
+
+		labels = list(interval_videos.keys())
+		arrays = [interval_videos[l] for l in labels]
+		n_intervals = len(labels)
+		counts = {labels[i]: len(arrays[i]) for i in range(n_intervals)}
+
+		# Simulación vectorizada
+		rng = np.random.default_rng(seed)
+		wins = np.zeros(n_intervals, dtype=np.int64)
+
+		idx_matrix = [rng.integers(0, len(arr), size=n_rounds) for arr in arrays]
+		views_matrix = np.column_stack(
+			[arr[idx] for arr, idx in zip(arrays, idx_matrix)]
+		)
+
+		winners = np.argmax(views_matrix, axis=1)
+		for i in range(n_intervals):
+			wins[i] = np.sum(winners == i)
+
+		win_pct = wins / n_rounds * 100
+		results = {labels[i]: float(win_pct[i]) for i in range(n_intervals)}
+
+		_plot_histogram(
+			results,
+			f"Monte Carlo – Victorias por nº de tags ({bucket_label})\n{n_rounds:,} rondas",
+			f"monte_carlo_tag_count_{bucket_name}",
+		)
+		_save_txt(
+			results,
+			f"monte_carlo_tag_count_{bucket_name}",
+			f"Monte Carlo – Nº de tags ({bucket_label})",
+			counts_d=counts,
+		)
+
+		all_results[bucket_name] = results
+
+	print(f"{'='*60}\n")
+	return all_results
+
+# Simulación Monte Carlo por longitud de descripción en caracteres
+def monte_carlo_description_length(
+	df: pd.DataFrame,
+	output_dir: str | None = None,
+	n_rounds: int = 200_000,
+	seed: int = 42,
+	save: bool = True,
+	show: bool = False,
+) -> dict:
+	"""
+	Simulación Monte Carlo por longitud de descripción (caracteres).
+
+	Para cada ronda se elige un video aleatorio de cada intervalo de
+	longitud de descripción; el intervalo cuyo video seleccionado tiene el
+	mayor viewCount gana esa ronda. Se repite `n_rounds` veces y se genera
+	un histograma con el porcentaje de victorias de cada intervalo.
+
+	Intervalos: 0-100, 100-250, 250-500, 500-750, 750-1000, 1000-1500,
+	            1500-2000, 2000-3000, 3000-4000, 4000-5000, 5000+ caracteres.
+
+	Se generan dos simulaciones separadas por duración:
+	  1) Videos ≤1 min
+	  2) Videos 1-16 min
+	"""
+
+	if output_dir is None:
+		root = Path(__file__).resolve().parents[1]
+		output_dir = root / "outputs" / "Random"
+	else:
+		output_dir = Path(output_dir)
+	output_dir.mkdir(parents=True, exist_ok=True)
+
+	# ── Resolver columna de descripción ─────────────────────────────────
+	desc_col = None
+	for c in ["description", "descripcion", "descripción", "desc", "about"]:
+		if c in df.columns:
+			desc_col = c
+			break
+	if desc_col is None:
+		for c in df.columns:
+			if re.search(r'descrip|about|sinopsis', c, re.I):
+				desc_col = c
+				break
+	if desc_col is None:
+		print("monte_carlo_description_length: No se encontró columna de descripción.")
+		return {}
+
+	# ── Resolver columna de vistas ──────────────────────────────────────
+	view_candidates = [
+		"viewCount", "views", "vistas", "visualizaciones",
+		"view_count", "reproducciones",
+	]
+	view_col = None
+	for c in view_candidates:
+		if c in df.columns:
+			view_col = c
+			break
+	if view_col is None:
+		for c in df.columns:
+			if re.search(r'view|vista|visual|reproduc', c, re.I):
+				view_col = c
+				break
+	if view_col is None:
+		print("monte_carlo_description_length: No se encontró columna de vistas/viewCount.")
+		return {}
+
+	# ── Resolver columna de duración en segundos ───────────────────────
+	duration_candidates = [
+		"durationSeconds", "duracion_segundos", "duration_seconds",
+		"duration_sec", "length_seconds",
+	]
+	dur_col = None
+	for c in duration_candidates:
+		if c in df.columns:
+			dur_col = c
+			break
+	if dur_col is None:
+		for c in df.columns:
+			if re.search(r'duraci|duration|length', c, re.I):
+				dur_col = c
+				break
+	if dur_col is None:
+		print("monte_carlo_description_length: No se encontró columna de duración.")
+		return {}
+
+	# ── Preparar datos ──────────────────────────────────────────────────
+	tmp = df[[desc_col, view_col, dur_col]].copy()
+	tmp["views"] = pd.to_numeric(tmp[view_col], errors="coerce")
+	tmp["dur_s"] = pd.to_numeric(tmp[dur_col], errors="coerce")
+	tmp = tmp.dropna(subset=["views", "dur_s"])
+	tmp["views"] = tmp["views"].astype(int)
+	tmp["dur_s"] = tmp["dur_s"].astype(float)
+
+	# Calcular longitud de descripción en caracteres
+	tmp["desc_len"] = tmp[desc_col].apply(
+		lambda x: len(str(x)) if pd.notna(x) and str(x).strip() not in ('', 'nan') else 0
+	)
+
+	# ── Definir intervalos de longitud de descripción ──────────────────
+	# Tuplas (lo, hi) donde hi=None significa sin límite superior
+	desc_bins = [
+		(0, 100), (100, 250), (250, 500), (500, 750), (750, 1000),
+		(1000, 1500), (1500, 2000), (2000, 3000), (3000, 4000),
+		(4000, 5000), (5000, None),
+	]
+
+	# ── Definir buckets de duración ─────────────────────────────────────
+	duration_buckets = [
+		("le1min",  lambda s: s <= 60,              "≤1min"),
+		("1_16min", lambda s: (s > 60) & (s <= 960), "1-16min"),
+	]
+
+	# ── Histograma ──────────────────────────────────────────────────────
+	def _plot_histogram(res: dict, title: str, filename: str):
+		if not res:
+			return
+		lbls = list(res.keys())
+		pcts = [res[l] for l in lbls]
+
+		fig, ax = plt.subplots(figsize=(14, 6))
+		bars = ax.bar(
+			range(len(lbls)), pcts,
+			color=sns.color_palette("viridis", len(lbls)),
+			edgecolor="black",
+		)
+		ax.set_xticks(range(len(lbls)))
+		ax.set_xticklabels(lbls, rotation=35, ha="right", fontsize=9)
+		ax.set_ylabel("% de victorias", fontsize=12)
+		ax.set_xlabel("Intervalo de longitud de descripción (caracteres)", fontsize=12)
+		ax.set_title(title, fontsize=14, fontweight="bold")
+
+		for bar, pct in zip(bars, pcts):
+			ax.text(
+				bar.get_x() + bar.get_width() / 2,
+				bar.get_height() + 0.3,
+				f"{pct:.2f}%",
+				ha="center", va="bottom", fontsize=9, fontweight="bold",
+			)
+
+		plt.tight_layout()
+		if save:
+			img_path = output_dir / f"{filename}.png"
+			fig.savefig(img_path, dpi=150)
+			print(f"Imagen guardada: {img_path}")
+		if show:
+			plt.show()
+		plt.close(fig)
+
+	# ── Guardar TXT ─────────────────────────────────────────────────────
+	def _save_txt(res: dict, filename: str, title: str, counts_d: dict | None = None):
+		if not res:
+			return
+		txt_path = output_dir / f"{filename}.txt"
+		with open(txt_path, "w", encoding="utf-8") as f:
+			f.write(f"{title}\n")
+			f.write(f"Rondas: {n_rounds:,}\n")
+			f.write(f"{'Intervalo':<18}{'Count':>8}{'Victorias':>12}{'%':>10}\n")
+			f.write("-" * 48 + "\n")
+			for label, pct in res.items():
+				wins_count = int(round(pct / 100 * n_rounds))
+				count_val = counts_d.get(label, 0) if counts_d else 0
+				f.write(f"{label:<18}{count_val:>8,}{wins_count:>12,}{pct:>9.2f}%\n")
+		print(f"Datos guardados: {txt_path}")
+
+	# ── Ejecutar simulación por cada bucket de duración ─────────────────
+	print(f"\n{'='*60}")
+	print(f"Monte Carlo – Longitud de descripción ({n_rounds:,} rondas)")
+	print(f"{'='*60}")
+
+	all_results = {}
+
+	for bucket_name, bucket_cond, bucket_label in duration_buckets:
+		print(f"\n→ Simulación para videos {bucket_label}...")
+		tmp_filtered = tmp[bucket_cond(tmp["dur_s"])].copy()
+
+		if tmp_filtered.empty:
+			print(f"  Sin datos para bucket {bucket_label}; omitido.")
+			continue
+
+		# Agrupar videos por intervalo de longitud de descripción
+		interval_videos: dict[str, np.ndarray] = {}
+		for lo, hi in desc_bins:
+			if hi is None:
+				mask = tmp_filtered["desc_len"] >= lo
+				label = f"{lo}+"
+			else:
+				mask = (tmp_filtered["desc_len"] >= lo) & (tmp_filtered["desc_len"] < hi)
+				label = f"{lo}-{hi}"
+			views_arr = tmp_filtered.loc[mask, "views"].values
+			if len(views_arr) > 0:
+				interval_videos[label] = views_arr
+
+		if len(interval_videos) < 2:
+			print(f"  monte_carlo_description_length ({bucket_label}): Menos de 2 intervalos con videos; omitido.")
+			continue
+
+		labels = list(interval_videos.keys())
+		arrays = [interval_videos[l] for l in labels]
+		n_intervals = len(labels)
+		counts = {labels[i]: len(arrays[i]) for i in range(n_intervals)}
+
+		# Simulación vectorizada
+		rng = np.random.default_rng(seed)
+		wins = np.zeros(n_intervals, dtype=np.int64)
+
+		idx_matrix = [rng.integers(0, len(arr), size=n_rounds) for arr in arrays]
+		views_matrix = np.column_stack(
+			[arr[idx] for arr, idx in zip(arrays, idx_matrix)]
+		)
+
+		winners = np.argmax(views_matrix, axis=1)
+		for i in range(n_intervals):
+			wins[i] = np.sum(winners == i)
+
+		win_pct = wins / n_rounds * 100
+		results = {labels[i]: float(win_pct[i]) for i in range(n_intervals)}
+
+		_plot_histogram(
+			results,
+			f"Monte Carlo – Victorias por longitud de descripción ({bucket_label})\n{n_rounds:,} rondas",
+			f"monte_carlo_description_length_{bucket_name}",
+		)
+		_save_txt(
+			results,
+			f"monte_carlo_description_length_{bucket_name}",
+			f"Monte Carlo – Longitud de descripción ({bucket_label})",
+			counts_d=counts,
+		)
+
+		all_results[bucket_name] = results
+
+	print(f"{'='*60}\n")
+	return all_results
+
 
 # Función principal para ejecutar el análisis
 def main() -> None:
@@ -2949,6 +4075,19 @@ def main() -> None:
 	analyze_duration_interval_distribution(df, output_dir=dist_dir, second_bins=second_bins_custom_1, file_suffix='sbins_v1')
 	analyze_duration_interval_distribution(df, output_dir=dist_dir, second_bins=second_bins_custom_2, file_suffix='sbins_v2')
 	analyze_duration_interval_distribution(df, output_dir=dist_dir, second_bins=second_bins_custom_3, file_suffix='sbins_v3')
+
+	#--------------------------------------------------
+	# MONTE CARLO – INTERVALOS DE DURACIÓN
+	#--------------------------------------------------
+	random_dir = os.path.join(root, 'outputs', 'Random')
+	os.makedirs(random_dir, exist_ok=True)
+
+	monte_carlo_duration_intervals(df, output_dir=random_dir)
+	monte_carlo_weekdays(df, output_dir=random_dir)
+	monte_carlo_title_words(df, output_dir=random_dir)
+	monte_carlo_tag_count(df, output_dir=random_dir)
+	monte_carlo_description_length(df, output_dir=random_dir)
+
 
 if __name__ == '__main__':
 	main()
