@@ -15,6 +15,158 @@ def load_csv(path: str) -> pd.DataFrame:
 	"""
 	return pd.read_csv(path, low_memory=False)
 
+# Analizar el porcentaje de videos por canal en un dataset
+def analyze_channel_percentage(df, root=None, output_dir=None, file_suffix=None, top_n=20):
+	"""
+	Calcula el porcentaje de videos por canal y guarda PNG y TXT.
+	Guarda archivos en outputs/<script>/ y evita sobreescrituras usando `file_suffix`.
+	
+	Args:
+		df: DataFrame con los datos
+		root: Directorio raíz del proyecto
+		output_dir: Directorio de salida personalizado (opcional)
+		file_suffix: Sufijo para el nombre de archivo (opcional)
+		top_n: Número de canales top a mostrar en el gráfico (default: 20)
+	
+	Returns:
+		DataFrame con estadísticas por canal (canal, count, percent)
+	"""
+	if root is None:
+		root = Path(__file__).resolve().parents[1]
+	outputs_root = root / "outputs"
+	outputs_root.mkdir(parents=True, exist_ok=True)
+	if output_dir is not None:
+		script_dir = Path(output_dir)
+	else:
+		script_dir = outputs_root / "EDA"
+	script_dir.mkdir(parents=True, exist_ok=True)
+
+	df = df.copy()
+
+	# Buscar columna de canal
+	channel_cols = [
+		"canal",
+		"canal_id",
+		"channel",
+		"channel_name",
+		"channel_title",
+		"channelTitle",
+		"nombre_canal",
+		"uploader",
+		"creator",
+	]
+	found = None
+	for c in channel_cols:
+		if c in df.columns:
+			found = c
+			break
+	if not found:
+		# Buscar por patrones más generales
+		for c in df.columns:
+			if re.search(r'canal|channel|uploader|creator', c, re.I):
+				found = c
+				break
+	if not found:
+		print("No se encontró una columna de canal para el análisis.")
+		return None
+
+	# Limpiar datos
+	df = df.dropna(subset=[found])
+	df[found] = df[found].astype(str).str.strip()
+	df = df[df[found] != '']
+	
+	if df.empty:
+		print("No hay datos válidos con canales para el análisis.")
+		return None
+
+	# Contar videos por canal
+	counts = df[found].value_counts()
+	total = int(counts.sum())
+	if total == 0:
+		print("No hay filas con canal válido para el análisis.")
+		return None
+
+	perc = (counts / total * 100).round(4)
+
+	# Preparar sufijo seguro
+	suffix = f"_{re.sub(r'\\W+', '_', str(file_suffix)).strip('_')}" if file_suffix else ""
+
+	# Crear DataFrame de resultados
+	results_df = pd.DataFrame({
+		'canal': counts.index,
+		'count': counts.values,
+		'percent': perc.values
+	})
+
+	# Gráfico de pastel con los top N canales
+	top_counts = counts.head(top_n)
+	top_perc = perc.head(top_n)
+	
+	# Agrupar el resto como "Otros"
+	otros_count = counts.iloc[top_n:].sum() if len(counts) > top_n else 0
+	
+	plt.figure(figsize=(12, 10))
+	
+	labels = [str(c)[:25] for c in top_counts.index]
+	sizes = top_counts.values.tolist()
+	
+	if otros_count > 0:
+		labels.append('Otros')
+		sizes.append(otros_count)
+	
+	colors = plt.cm.viridis([i / len(labels) for i in range(len(labels))])
+	
+	# Crear gráfico de pastel
+	wedges, texts, autotexts = plt.pie(
+		sizes, 
+		labels=None,
+		autopct=lambda p: f'{p:.1f}%' if p > 2 else '',
+		colors=colors,
+		startangle=90,
+		pctdistance=0.8,
+		wedgeprops={'linewidth': 0.5, 'edgecolor': 'white'}
+	)
+	
+	# Aumentar tamaño de fuentes para mejor legibilidad
+	title_fs = 18
+	legend_fs = 13
+	autotext_fs = 12
+
+	for t in autotexts:
+		t.set_fontsize(autotext_fs)
+		t.set_weight('bold')
+		t.set_color('white')
+
+	# Leyenda externa con fuente más grande
+	plt.legend(wedges, labels, title="Canales", loc="center left", bbox_to_anchor=(1, 0.5), fontsize=legend_fs, title_fontsize=legend_fs+1)
+	plt.title(f'Distribución de Videos por Canal (Top {top_n})', fontsize=title_fs)
+	
+	plt.tight_layout()
+
+	out_file = script_dir / f"channel_percentage{suffix}.png"
+	plt.savefig(out_file, dpi=150)
+	print(f"Gráfico de canales guardado en {out_file}")
+
+	# Guardar txt con todos los canales
+	txt_file = script_dir / f"channel_percentage{suffix}.txt"
+	with open(txt_file, 'w', encoding='utf-8') as f:
+		f.write('Canal,Count,Percent\n')
+		for _, row in results_df.iterrows():
+			f.write(f"{row['canal']},{int(row['count'])},{row['percent']:.4f}\n")
+	print(f"Conteos por canal guardados en {txt_file}")
+	
+	# Mostrar resumen
+	print(f"\n--- Resumen del análisis por canal ---")
+	print(f"Total de videos: {total}")
+	print(f"Total de canales únicos: {len(counts)}")
+	print(f"\nTop 10 canales:")
+	for i, (canal, cnt) in enumerate(counts.head(10).items(), 1):
+		p = perc.loc[canal]
+		print(f"  {i}. {canal}: {cnt} videos ({p:.2f}%)")
+	
+	plt.close()
+	return results_df
+
 # Gráfico de pastel con porcentaje de videos por calidad (definición)
 def plot_definicion_pie(df=None, csv_path=None, root=None, output_dir=None, file_suffix=None, save=True, show=False):
 	"""
@@ -1023,13 +1175,14 @@ def analyze_title_word_count(df, root=None, output_dir=None, file_suffix=None, c
 	# Buckets objetivo
 	b1 = 60
 	b2 = 16 * 60
+	b3 = 3 * 60
 	if duracion_filter is not None:
 		# Si se proporciona un filtro explícito, usar solo ese
 		buckets = [("custom", lambda s: (s >= (duracion_filter[0] or -float('inf'))) & (s <= (duracion_filter[1] or float('inf'))))]
 	else:
 		buckets = [
 			("le1min", lambda s: s <= b1),
-			("1_16min", lambda s: (s > b1) & (s <= b2)),
+			("3_16min", lambda s: (s > b3) & (s <= b2)),
 		]
 
 	interval_labels = ['1-3', '4-6', '7-9', '10-12', '13-15', '16+']
@@ -1314,13 +1467,14 @@ def analyze_description_length(df, root=None, output_dir=None, file_suffix=None,
 		include_lowest=True,
 	)
 
-	# Buckets por defecto si no hay duracion_filter: <=1min y (1min,16min]
+	# Buckets por defecto si no hay duracion_filter: <=1min y (3min,16min]
 	b1 = 60
 	b2 = 16 * 60
+	b3 = 3 * 60
 	if duracion_filter is None:
 		buckets = [
 			("le1min", lambda s: s <= b1),
-			("1_16min", lambda s: (s > b1) & (s <= b2)),
+			("3_16min", lambda s: (s > b3) & (s <= b2)),
 		]
 	else:
 		buckets = [("custom", lambda s: (s >= (duracion_filter[0] or -float('inf'))) & (s <= (duracion_filter[1] or float('inf'))))]
@@ -1636,12 +1790,13 @@ def analyze_tags_intervals(df, root=None, output_dir=None, file_suffix=None, can
 	filter_label = " | ".join(filter_desc_parts) if filter_desc_parts else ""
 	suffix_base = f"_{re.sub(r'\\W+', '_', str(file_suffix)).strip('_')}" if file_suffix else ""
 
-	# Buckets por duración: <=1min y (1min,16min]
+	# Buckets por duración: <=1min y (3min,16min]
 	b1 = 60
 	b2 = 16 * 60
+	b3 = 3 * 60
 	buckets = [
 		("le1min", lambda s: s <= b1),
-		("1_16min", lambda s: (s > b1) & (s <= b2)),
+		("3_16min", lambda s: (s > b3) & (s <= b2)),
 	]
 
 	results = {}
@@ -1906,10 +2061,11 @@ def analyze_most_frequent_tags(df, root=None, output_dir=None, file_suffix=None,
 	# Definir buckets
 	b1 = 60
 	b2 = 16 * 60
+	b3 = 3 * 60
 	if duracion_filter is None and '__duration_s' in df.columns:
 		buckets = [
 			("le1min", lambda s: s <= b1),
-			("1_16min", lambda s: (s > b1) & (s <= b2)),
+			("3_16min", lambda s: (s > b3) & (s <= b2)),
 		]
 	elif duracion_filter is not None:
 		buckets = [("custom", lambda s: (s >= (duracion_filter[0] or -float('inf'))) & (s <= (duracion_filter[1] or float('inf'))))]
@@ -2283,8 +2439,8 @@ def analyze_publications_2h_intervals(df, root=None, output_dir=None, file_suffi
 			por_dia_dir = outputs_root / "Análisis del día"
 			por_dia_dir.mkdir(parents=True, exist_ok=True)
 
-		# Preparar subcarpetas para <=1min y (1min,16min] dentro del directorio por_dia
-		long_dir = por_dia_dir / "1_16min"
+		# Preparar subcarpetas para <=1min y (3min,16min] dentro del directorio por_dia
+		long_dir = por_dia_dir / "3_16min"
 		short_dir = por_dia_dir / "menos_1min"
 		long_dir.mkdir(parents=True, exist_ok=True)
 		short_dir.mkdir(parents=True, exist_ok=True)
@@ -2375,11 +2531,11 @@ def analyze_publications_2h_intervals(df, root=None, output_dir=None, file_suffi
 			plt.close()
 			all_results[day_label] = counts_day
 
-			# --- Guardar análisis para videos entre 1min y 16min en long_dir ---
+			# --- Guardar análisis para videos entre 3min y 16min en long_dir ---
 			try:
 				df_day_mid = df_day.copy()
 				if '__dur_s' in df_day_mid.columns:
-					df_day_mid = df_day_mid[(df_day_mid['__dur_s'] > 60) & (df_day_mid['__dur_s'] <= 16 * 60)]
+					df_day_mid = df_day_mid[(df_day_mid['__dur_s'] > 3 * 60) & (df_day_mid['__dur_s'] <= 16 * 60)]
 				else:
 					df_day_mid = df_day_mid.iloc[0:0]
 			except Exception:
@@ -2393,12 +2549,12 @@ def analyze_publications_2h_intervals(df, root=None, output_dir=None, file_suffi
 			plt.xticks(rotation=45, ha='right')
 			plt.xlabel('Intervalo horario')
 			plt.ylabel('Cantidad de videos publicados')
-			plt.title(f'Publicaciones por intervalos (1-16min) - {day_label}')
+			plt.title(f'Publicaciones por intervalos (3-16min] - {day_label}')
 			plt.tight_layout()
 
 			out_png_mid = long_dir / f"hour_2h_histogram_{day_name_file}.png"
 			plt.savefig(out_png_mid, dpi=150)
-			print(f"  Histograma 1-16min {day_label} guardado en {out_png_mid}")
+			print(f"  Histograma 3-16min {day_label} guardado en {out_png_mid}")
 
 			out_txt_mid = long_dir / f"hour_2h_histogram_{day_name_file}.txt"
 			with open(out_txt_mid, 'w', encoding='utf-8') as f:
@@ -2408,7 +2564,7 @@ def analyze_publications_2h_intervals(df, root=None, output_dir=None, file_suffi
 				f.write('Interval,Count\n')
 				for lbl, cnt in counts_day_mid.items():
 					f.write(f"{lbl},{int(cnt)}\n")
-			print(f"  Conteos 1-16min {day_label} guardados en {out_txt_mid}")
+			print(f"  Conteos 3-16min {day_label} guardados en {out_txt_mid}")
 			plt.close()
 
 			# --- Guardar análisis para videos <=1min en short_dir ---
@@ -2939,7 +3095,7 @@ def monte_carlo_duration_intervals(
 
 	# ── Definir intervalos ──────────────────────────────────────────────
 	second_bins = [(0, 5), (5, 10), (10, 15), (15, 20), (20, 30), (30, 40), (40, 50), (50, 60)]
-	minute_bins = [(m, m + 1) for m in range(1, 16)]  # [1-2], [2-3], …, [15-16]
+	minute_bins = [(m, m + 1) for m in range(3, 16)]  # [3-4], [4-5], …, [15-16]
 
 	# ── Función interna de simulación ───────────────────────────────────
 	def _run_simulation(bins_def, unit="s"):
@@ -2952,11 +3108,11 @@ def monte_carlo_duration_intervals(
 		interval_videos: dict[str, np.ndarray] = {}  # label -> array de views
 		for lo, hi in bins_def:
 			if unit == "s":
-				mask = (tmp["dur_s"] >= lo) & (tmp["dur_s"] < hi)
-				label = f"[{lo}-{hi}]s"
+				mask = (tmp["dur_s"] > lo) & (tmp["dur_s"] <= hi)
+				label = f"({lo}-{hi}]s"
 			else:  # minutos
-				mask = (tmp["dur_s"] >= lo * 60) & (tmp["dur_s"] < hi * 60)
-				label = f"[{lo}-{hi}]min"
+				mask = (tmp["dur_s"] > lo * 60) & (tmp["dur_s"] <= hi * 60)
+				label = f"({lo}-{hi}]min"
 			views_arr = tmp.loc[mask, "views"].values
 			if len(views_arr) > 0:
 				interval_videos[label] = views_arr
@@ -3182,8 +3338,8 @@ def monte_carlo_weekdays(
 
 	# ── Definir buckets de duración ─────────────────────────────────────
 	duration_buckets = [
-		("le1min",  lambda s: s <= 60,              "≤1min"),
-		("1_16min", lambda s: (s > 60) & (s <= 960), "1-16min"),
+		("le1min",  lambda s: s <= 60,               "≤1min"),
+		("3_16min", lambda s: (s > 180) & (s <= 960), "3-16min"),
 	]
 
 	# ── Histograma ──────────────────────────────────────────────────────
@@ -3401,8 +3557,8 @@ def monte_carlo_title_words(
 
 	# ── Definir buckets de duración ─────────────────────────────────────
 	duration_buckets = [
-		("le1min",  lambda s: s <= 60,              "≤1min"),
-		("1_16min", lambda s: (s > 60) & (s <= 960), "1-16min"),
+		("le1min",  lambda s: s <= 60,               "≤1min"),
+		("3_16min", lambda s: (s > 180) & (s <= 960), "3-16min"),
 	]
 
 	# ── Histograma ──────────────────────────────────────────────────────
@@ -3629,8 +3785,8 @@ def monte_carlo_tag_count(
 
 	# ── Definir buckets de duración ─────────────────────────────────────
 	duration_buckets = [
-		("le1min",  lambda s: s <= 60,              "≤1min"),
-		("1_16min", lambda s: (s > 60) & (s <= 960), "1-16min"),
+		("le1min",  lambda s: s <= 60,               "≤1min"),
+		("3_16min", lambda s: (s > 180) & (s <= 960), "3-16min"),
 	]
 
 	# ── Histograma ──────────────────────────────────────────────────────
@@ -3859,8 +4015,8 @@ def monte_carlo_description_length(
 
 	# ── Definir buckets de duración ─────────────────────────────────────
 	duration_buckets = [
-		("le1min",  lambda s: s <= 60,              "≤1min"),
-		("1_16min", lambda s: (s > 60) & (s <= 960), "1-16min"),
+		("le1min",  lambda s: s <= 60,               "≤1min"),
+		("3_16min", lambda s: (s > 180) & (s <= 960), "3-16min"),
 	]
 
 	# ── Histograma ──────────────────────────────────────────────────────
@@ -3996,7 +4152,7 @@ def monte_carlo_hourly_by_weekday(
 ) -> dict:
 	"""
 	Simulación Monte Carlo por intervalos de 2 h, ejecutada por separado para
-	cada día de la semana y cada bucket de duración (≤1 min y 1-16 min).
+	cada día de la semana y cada bucket de duración (≤1 min y 3-16 min).
 
 	Para un día dado se divide la jornada (hora militar) en intervalos de 2 h:
 	(0-2], (2-4], …, (22-24].  En cada ronda se elige un video aleatorio de
@@ -4008,7 +4164,7 @@ def monte_carlo_hourly_by_weekday(
 	*outputs/Random*):
 
 	* ``menos_1min/``  – videos con duración ≤ 60 s
-	* ``1_16min/``     – videos con 60 < duración ≤ 960 s
+	* ``3_16min/``     – videos con 60*3 < duración ≤ 960 s
 
 	Dentro de cada carpeta se guarda un archivo TXT y una imagen PNG por día.
 	"""
@@ -4105,7 +4261,7 @@ def monte_carlo_hourly_by_weekday(
 
 	duration_buckets = [
 		("menos_1min", lambda s: s <= 60,               "≤1min"),
-		("1_16min",    lambda s: (s > 60) & (s <= 960), "1-16min"),
+		("3_16min",    lambda s: (s > 180) & (s <= 960), "3-16min"),
 	]
 
 	# ── Funciones internas ──────────────────────────────────────────────
@@ -4255,7 +4411,7 @@ def monte_carlo_hourly_2h(
 	semana).  Genera **una imagen** por bucket de duración:
 
 	* ``monte_carlo_hourly_2h_le1min.png``  – videos con duración ≤ 60 s
-	* ``monte_carlo_hourly_2h_1_16min.png`` – videos con 60 < duración ≤ 960 s
+	* ``monte_carlo_hourly_2h_3_16min.png`` – videos con 60*3 < duración ≤ 960 s
 
 	En cada ronda se elige un video aleatorio de cada intervalo de 2 h que
 	contenga al menos un video y el intervalo cuyo video seleccionado tiene el
@@ -4349,7 +4505,7 @@ def monte_carlo_hourly_2h(
 
 	duration_buckets = [
 		("le1min",  lambda s: s <= 60,               "≤1min"),
-		("1_16min", lambda s: (s > 60) & (s <= 960), "1-16min"),
+		("3_16min", lambda s: (s > 180) & (s <= 960), "3-16min"),
 	]
 
 	# ── Funciones internas ──────────────────────────────────────────────
@@ -4471,6 +4627,396 @@ def monte_carlo_hourly_2h(
 	print(f"{'='*60}\n")
 	return all_results
 
+# ── Monte Carlo: comparación directa entre dos datasets ────────────────────
+def monte_carlo_two_datasets(
+	df_a: pd.DataFrame,
+	df_b: pd.DataFrame,
+	label_a: str = "filtered",
+	label_b: str = "remainder",
+	output_dir: str | None = None,
+	file_suffix: str | None = None,
+	n_rounds: int = 200_000,
+	seed: int = 42,
+	save: bool = True,
+	show: bool = False,
+) -> dict:
+	"""
+	Simulación Monte Carlo para comparar dos datasets por viewCount.
+
+	En cada ronda se elige aleatoriamente un video de `df_a` y otro de `df_b`;
+	gana el que tenga mayor viewCount.  Se acumulan resultados a lo largo de
+	`n_rounds` rondas y se genera un gráfico de barras con el % de victorias
+	para cada dataset más el % de empates.
+
+	Args:
+		df_a:        Dataset A (p. ej. videos filtrados / shorts).
+		df_b:        Dataset B (p. ej. videos restantes / largos).
+		label_a:     Etiqueta para el dataset A en el gráfico.
+		label_b:     Etiqueta para el dataset B en el gráfico.
+		output_dir:  Directorio de salida.  Por defecto outputs/Random.
+		file_suffix: Sufijo para el nombre de archivo de salida.
+		n_rounds:    Número de rondas de la simulación (default 200 000).
+		seed:        Semilla para reproducibilidad.
+		save:        Si True, guarda PNG y TXT.
+		show:        Si True, muestra el gráfico en pantalla.
+
+	Returns:
+		dict con claves 'label_a', 'label_b', 'ties' y su % de victorias.
+	"""
+
+	if output_dir is None:
+		root = Path(__file__).resolve().parents[1]
+		output_dir = root / "outputs" / "Random"
+	else:
+		output_dir = Path(output_dir)
+	output_dir.mkdir(parents=True, exist_ok=True)
+
+	# ── Resolver columna de vistas ──────────────────────────────────────
+	view_candidates = [
+		"viewCount", "views", "vistas", "visualizaciones",
+		"view_count", "reproducciones",
+	]
+
+	def _find_view_col(df: pd.DataFrame) -> str | None:
+		for c in view_candidates:
+			if c in df.columns:
+				return c
+		for c in df.columns:
+			if re.search(r'view|vista|visual|reproduc', c, re.I):
+				return c
+		return None
+
+	view_col_a = _find_view_col(df_a)
+	view_col_b = _find_view_col(df_b)
+
+	if view_col_a is None:
+		print("monte_carlo_two_datasets: No se encontró columna de vistas en df_a.")
+		return {}
+	if view_col_b is None:
+		print("monte_carlo_two_datasets: No se encontró columna de vistas en df_b.")
+		return {}
+
+	# ── Preparar arrays de vistas ───────────────────────────────────────
+	views_a = pd.to_numeric(df_a[view_col_a], errors="coerce").dropna().astype(np.int64).values
+	views_b = pd.to_numeric(df_b[view_col_b], errors="coerce").dropna().astype(np.int64).values
+
+	if len(views_a) == 0:
+		print("monte_carlo_two_datasets: df_a no tiene vistas válidas.")
+		return {}
+	if len(views_b) == 0:
+		print("monte_carlo_two_datasets: df_b no tiene vistas válidas.")
+		return {}
+
+	# ── Simulación vectorizada ──────────────────────────────────────────
+	print(f"\n{'='*60}")
+	print(f"Monte Carlo – {label_a} vs {label_b} ({n_rounds:,} rondas)")
+	print(f"  {label_a}: {len(views_a):,} videos  |  {label_b}: {len(views_b):,} videos")
+	print(f"{'='*60}")
+
+	rng = np.random.default_rng(seed)
+	idx_a = rng.integers(0, len(views_a), size=n_rounds)
+	idx_b = rng.integers(0, len(views_b), size=n_rounds)
+
+	sampled_a = views_a[idx_a]
+	sampled_b = views_b[idx_b]
+
+	wins_a   = int(np.sum(sampled_a > sampled_b))
+	wins_b   = int(np.sum(sampled_b > sampled_a))
+	ties     = int(np.sum(sampled_a == sampled_b))
+
+	pct_a    = wins_a   / n_rounds * 100
+	pct_b    = wins_b   / n_rounds * 100
+	pct_ties = ties     / n_rounds * 100
+
+	print(f"  {label_a:<20} → {pct_a:>6.2f}%  ({wins_a:,} victorias)")
+	print(f"  {label_b:<20} → {pct_b:>6.2f}%  ({wins_b:,} victorias)")
+	print(f"  {'ties':<20} → {pct_ties:>6.2f}%  ({ties:,} empates)")
+	print(f"{'='*60}\n")
+
+	results = {label_a: pct_a, label_b: pct_b, "ties": pct_ties}
+
+	# ── Nombre de archivo base ──────────────────────────────────────────
+	base_name = f"monte_carlo_{label_a}_vs_{label_b}"
+	if file_suffix:
+		base_name = f"{base_name}_{file_suffix}"
+
+	# ── Gráfico ─────────────────────────────────────────────────────────
+	if save or show:
+		labels_plot = [label_a, label_b, "ties"]
+		pcts_plot   = [pct_a,   pct_b,   pct_ties]
+		# Colores: azul para A, naranja para B, gris muy claro para ties
+		colors = ["#1f77b4", "#d2874a", "#7f7f7f"]
+
+		fig, ax = plt.subplots(figsize=(9, 6))
+		bars = ax.bar(labels_plot, pcts_plot, color=colors, width=0.5)
+
+		ax.set_ylim(0, 100)
+		ax.set_ylabel("% victorias", fontsize=12)
+		ax.set_title(
+			f"Monte Carlo: {n_rounds:,} rondas — % victorias",
+			fontsize=13, fontweight="bold",
+		)
+		ax.spines["top"].set_visible(False)
+		ax.spines["right"].set_visible(False)
+
+		# Etiquetas sobre barras
+		for bar, pct in zip(bars, pcts_plot):
+			ax.text(
+				bar.get_x() + bar.get_width() / 2,
+				bar.get_height() + 0.6,
+				f"{pct:.2f}%",
+				ha="center", va="bottom", fontsize=11, fontweight="bold",
+			)
+
+		plt.tight_layout()
+
+		if save:
+			img_path = output_dir / f"{base_name}.png"
+			fig.savefig(img_path, dpi=150)
+			print(f"Imagen guardada: {img_path}")
+
+		if show:
+			plt.show()
+
+		plt.close(fig)
+
+	# ── TXT ─────────────────────────────────────────────────────────────
+	if save:
+		txt_path = output_dir / f"{base_name}.txt"
+		with open(txt_path, "w", encoding="utf-8") as f:
+			f.write(f"Monte Carlo: {label_a} vs {label_b}\n")
+			f.write(f"Rondas: {n_rounds:,}\n")
+			f.write(f"{'Dataset':<20}{'Victorias':>12}{'%':>10}\n")
+			f.write("-" * 42 + "\n")
+			f.write(f"{label_a:<20}{wins_a:>12,}{pct_a:>9.2f}%\n")
+			f.write(f"{label_b:<20}{wins_b:>12,}{pct_b:>9.2f}%\n")
+			f.write(f"{'ties':<20}{ties:>12,}{pct_ties:>9.2f}%\n")
+		print(f"Datos guardados: {txt_path}")
+
+	return results
+
+# Filtrado de videos por múltiples propiedades
+def filter_videos_by_properties(df, title_word_intervals=None, hour_intervals=None,
+								days_list=None, duration_intervals=None,
+								tag_count_intervals=None, duration_filter_mode=3):
+	"""
+	Filtra `df` devolviendo (filtrados, restantes).
+
+	Selecciona las filas que cumplen TODOS los parámetros. Para cada parámetro
+	que recibe una lista de intervalos se acepta que la fila cumpla al menos
+	uno de los intervalos de esa lista. Parámetros vacíos/None se ignoran
+	(no filtran).
+
+	Args:
+		df: DataFrame de entrada.
+		title_word_intervals: lista de tuplas (a,b) para cantidad de palabras del título.
+		hour_intervals: lista de tuplas (a,b) para hora del día (0-23). Soporta intervalos
+			"envolventes" (ej. (22,2)).
+		days_list: lista de días en español, p.ej. ["Lunes","Martes",...].
+		duration_intervals: lista de tuplas (a,b) en segundos.
+		tag_count_intervals: lista de tuplas (a,b) para cantidad de tags.
+		duration_filter_mode: int (1|2|3).
+			1 → trabaja solo con videos de duración <= 60 s  (≤ 1 min).
+			2 → trabaja solo con videos de duración (60, 960] s  (1 min–16 min].
+			3 → sin prefiltro de duración (por defecto).
+
+	Returns:
+		(filtered_df, remainder_df)
+	"""
+	df = df.copy()
+
+	# ── Helpers para detectar columnas ───────────────────────────────────
+	def find_column(candidates, pattern=None):
+		for c in candidates:
+			if c in df.columns:
+				return c
+		if pattern:
+			for c in df.columns:
+				if re.search(pattern, c, re.I):
+					return c
+		return None
+
+	# Column candidates
+	title_col = find_column(
+		['title', 'titulo', 'video_title', 'name', 'titulo_video'], r'titl|titulo')
+	publish_col = find_column([
+		'publish_time', 'publish_date', 'publishTimestamp', 'publishedAt',
+		'upload_time', 'uploaded_at', 'fecha_publicacion', 'fecha_publicación',
+		'fecha', 'published_at'], r'publish|upload|date|time|fecha|publica')
+	duration_col = find_column([
+		'duration', 'duracion', 'duracion_iso', 'duracion_segundos',
+		'duracion_legible', 'video_duration', 'length', 'duration_sec',
+		'length_seconds', 'duration_seconds', 'duration_ms'], r'duraci|duration|length')
+	tags_col = find_column(
+		['tags', 'etiquetas', 'tag_list', 'tag', 'keywords'], r'tag|keyword|etiquet')
+
+	# ── Parsear publish time si hace falta ───────────────────────────────
+	if publish_col:
+		try:
+			is_dt = pd.api.types.is_datetime64_any_dtype(df[publish_col].dtype)
+		except Exception:
+			is_dt = False
+		if not is_dt:
+			try:
+				df[publish_col] = pd.to_datetime(df[publish_col], errors='coerce')
+			except Exception:
+				df[publish_col] = pd.to_datetime(
+					df[publish_col].astype(str), errors='coerce')
+
+	# ── Mapeo de días en español ─────────────────────────────────────────
+	dias_es = {
+		0: 'Lunes', 1: 'Martes', 2: 'Miércoles',
+		3: 'Jueves', 4: 'Viernes', 5: 'Sábado', 6: 'Domingo',
+	}
+
+	# ── Contadores / parsers ─────────────────────────────────────────────
+	def count_title_words(x):
+		if pd.isna(x):
+			return 0
+		return len(re.findall(r"\w+", str(x), flags=re.UNICODE))
+
+	def to_seconds(x):
+		if pd.isna(x):
+			return None
+		if isinstance(x, (int, float)) and not isinstance(x, bool):
+			val = float(x)
+			if val > 1e6:          # probablemente milisegundos
+				return int(val / 1000)
+			return int(val)
+		s = str(x).strip()
+		m_iso = re.match(r'^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$', s)
+		if m_iso:
+			h = int(m_iso.group(1) or 0)
+			m = int(m_iso.group(2) or 0)
+			ss = int(m_iso.group(3) or 0)
+			return h * 3600 + m * 60 + ss
+		if ':' in s:
+			parts = [p for p in s.split(':') if p.strip() != '']
+			try:
+				if len(parts) == 3:
+					h, mm, ss = parts
+					return int(h) * 3600 + int(mm) * 60 + int(float(ss))
+				if len(parts) == 2:
+					mm, ss = parts
+					return int(mm) * 60 + int(float(ss))
+			except Exception:
+				pass
+		m_hms = re.search(r'(?:(\d+)\s*h)', s, re.I)
+		m_min = re.search(r'(?:(\d+)\s*m)', s, re.I)
+		m_sec = re.search(r'(?:(\d+)\s*s)', s, re.I)
+		if m_hms or m_min or m_sec:
+			h = int(m_hms.group(1)) if m_hms else 0
+			mm = int(m_min.group(1)) if m_min else 0
+			ss = int(m_sec.group(1)) if m_sec else 0
+			return h * 3600 + mm * 60 + ss
+		m_digits = re.search(r'^(\d+(?:\.\d+)?)$', s)
+		if m_digits:
+			try:
+				return int(float(m_digits.group(1)))
+			except Exception:
+				return None
+		return None
+
+	def count_tags(x):
+		if pd.isna(x):
+			return 0
+		if isinstance(x, (list, tuple, set)):
+			return len(x)
+		s = str(x).strip()
+		try:
+			import ast
+			v = ast.literal_eval(s)
+			if isinstance(v, (list, tuple, set)):
+				return len(v)
+		except Exception:
+			pass
+		parts = re.split(r'[\|,;]+', s)
+		parts = [p.strip() for p in parts if p.strip() != '']
+		return len(parts)
+
+	# ── Prefiltro por duration_filter_mode ───────────────────────────────
+	if int(duration_filter_mode) in (1, 2) and duration_col and duration_col in df.columns:
+		dur_secs = df[duration_col].apply(to_seconds).fillna(-1).astype(int)
+		if int(duration_filter_mode) == 1:
+			# Solo videos con duración <= 60 s (≤ 1 min)
+			df = df[dur_secs <= 60].copy()
+		elif int(duration_filter_mode) == 2:
+			# Solo videos con duración (60, 960] s  — (1 min, 16 min]
+			df = df[(dur_secs > 60) & (dur_secs <= 960)].copy()
+
+	# ── Construir máscara (True = cumple todos los filtros) ──────────────
+	mask = pd.Series(True, index=df.index)
+
+	# Filtro título
+	if title_word_intervals:
+		counts = (df[title_col].apply(count_title_words)
+				  if title_col and title_col in df.columns
+				  else pd.Series(0, index=df.index))
+		m = pd.Series(False, index=df.index)
+		for a, b in title_word_intervals:
+			m |= counts.between(int(a), int(b), inclusive='both')
+		mask &= m
+
+	# Filtro hora
+	if hour_intervals:
+		if not publish_col or publish_col not in df.columns:
+			mask &= pd.Series(False, index=df.index)
+		else:
+			hours = df[publish_col].dt.hour.fillna(-1).astype(int)
+			m = pd.Series(False, index=df.index)
+			for a, b in hour_intervals:
+				a_i, b_i = int(a), int(b)
+				if a_i <= b_i:
+					m |= hours.between(a_i, b_i, inclusive='both')
+				else:
+					m |= (hours >= a_i) | (hours <= b_i)
+			mask &= m
+
+	# Filtro días
+	if days_list:
+		if not publish_col or publish_col not in df.columns:
+			mask &= pd.Series(False, index=df.index)
+		else:
+			weekday_nums = df[publish_col].dt.weekday
+
+			def _weekday_to_name(x):
+				if pd.isna(x):
+					return ''
+				try:
+					return dias_es.get(int(x), '')
+				except Exception:
+					return ''
+
+			nombres = weekday_nums.map(_weekday_to_name)
+			mask &= nombres.isin(days_list)
+
+	# Filtro duración (intervalos explícitos adicionales)
+	if duration_intervals:
+		if not duration_col or duration_col not in df.columns:
+			mask &= pd.Series(False, index=df.index)
+		else:
+			secs = df[duration_col].apply(to_seconds).fillna(-1).astype(int)
+			m = pd.Series(False, index=df.index)
+			for a, b in duration_intervals:
+				m |= secs.between(int(a), int(b), inclusive='both')
+			mask &= m
+
+	# Filtro tags
+	if tag_count_intervals:
+		if not tags_col or tags_col not in df.columns:
+			mask &= pd.Series(False, index=df.index)
+		else:
+			tcounts = df[tags_col].apply(count_tags)
+			m = pd.Series(False, index=df.index)
+			for a, b in tag_count_intervals:
+				m |= tcounts.between(int(a), int(b), inclusive='both')
+			mask &= m
+
+	filtered = df[mask].copy()
+	remainder = df[~mask].copy()
+
+	return filtered, remainder
+
 
 # Función principal para ejecutar el análisis
 def main() -> None:
@@ -4491,6 +5037,9 @@ def main() -> None:
 
 	# Analizar porcentaje de filas por año dentro de outputs/EDA
 	analyze_yearly_percentage(df, output_dir=eda_dir)
+
+	# Analizar porcentaje de videos por canal y guardar en outputs/EDA
+	analyze_channel_percentage(df, output_dir=eda_dir)
 
 	# Generar gráfico de distribución por duración y guardarlo también en outputs/EDA
 	plot_duration_pie_buckets(df, output_dir=eda_dir)
@@ -4535,7 +5084,7 @@ def main() -> None:
 	analyze_weekday_distribution(df, output_dir=weekdays_dir, file_suffix='le1min', duracion_filter=(None, 60))
 
 	# Videos entre 1min (exclusive) y 16min (<= 960s)
-	analyze_weekday_distribution(df, output_dir=weekdays_dir, file_suffix='1_16min', duracion_filter=(60, 16*60))
+	analyze_weekday_distribution(df, output_dir=weekdays_dir, file_suffix='3_16min', duracion_filter=(60*3, 16*60))
 
 	#--------------------------------------------------
 	# ANÁLISIS DEL DÍA 
@@ -4575,6 +5124,36 @@ def main() -> None:
 	monte_carlo_description_length(df, output_dir=random_dir)
 	monte_carlo_hourly_by_weekday(df, output_dir=random_dir)
 	monte_carlo_hourly_2h(df, output_dir=random_dir)
+
+	#--------------------------------------------------
+	# FILTRADO Y MONTE CARLO DOS DATASETS
+	#--------------------------------------------------
+	
+	resultados_dir = os.path.join(root, 'outputs', 'Resultados')
+	os.makedirs(resultados_dir, exist_ok=True)
+ 	
+	df_filtrados, df_restantes = filter_videos_by_properties(
+		df,
+		title_word_intervals=[(3, 8)],
+		hour_intervals=[(18, 23)],
+		days_list=["Lunes", "Martes", "Miércoles", "Jueves", "Viernes"],
+		duration_intervals=[(60, 960)],
+		tag_count_intervals=[(3, 15)],
+		duration_filter_mode=2,
+	)
+
+	monte_carlo_two_datasets(
+		df_a=df_filtrados,
+		df_b=df_restantes,
+		label_a="filtrados",
+		label_b="restantes",
+		output_dir=resultados_dir,
+		file_suffix="filtro_propiedades",
+		n_rounds=200_000,
+		seed=42,
+		save=True,
+		show=False,
+	)
 
 
 
