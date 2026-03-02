@@ -2,8 +2,8 @@
 """
 Pipeline de descarga de videos de YouTube – Categoría Entretenimiento (24)
 ==========================================================================
-• Shorts:  0 < duración < 60 s
-• Largos:  60 s ≤ duración ≤ 960 s  (16 min)
+• Shorts:  duración ≤ 60 s
+• Largos:  3 min < duración ≤ 16 min  (es decir, (180, 960] segundos)
 • Proporción objetivo: 50 / 50
 • Cuota diaria: 10 000 unidades  (search.list=100, videos.list=1 por llamada)
 • Soporte incremental: guarda cursor en dataset/state.json
@@ -77,7 +77,7 @@ YEAR_START = "2024-01-01T00:00:00Z"
 YEAR_END = "2026-12-31T23:59:59Z"
 
 # Prioridad explícita de años (procesar en este orden)
-YEARS_PRIORITY = ["2026", "2025", "2024"]
+YEARS_PRIORITY = ["2025", "2024", "2026"]
 
 # ── Utilidades ───────────────────────────────────────────────────────────────
 def parse_duration(iso):
@@ -89,10 +89,19 @@ def parse_duration(iso):
 
 
 def classify(secs):
-    """short | long | None (descartado)."""
-    if 0 < secs < 60:
+    """short | long | None (descartado).
+
+    - `short`: duración positiva y <= 60 s
+    - `long` : duración estrictamente mayor a 180 s (3 min) y <= 960 s (16 min)
+    - `None` : fuera de los rangos objetivo
+    """
+    try:
+        secs = int(secs or 0)
+    except (TypeError, ValueError):
+        return None
+    if secs > 0 and secs <= 60:
         return "short"
-    if 60 <= secs <= 960:
+    if secs > 180 and secs <= 960:
         return "long"
     return None
 
