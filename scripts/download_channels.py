@@ -11,7 +11,7 @@ Cada canal se guarda como CSV independiente en dataset/channels/.
 Variables por video:
   id, title, description, publishedAt, channelId, channelTitle,
   tags, categoryId, duration, durationSeconds, viewCount,
-  commentCount, definicion, idioma_audio, likeCount
+  commentCount, definicion, idioma_audio
 
 Uso:
     python scripts/download_channels.py
@@ -60,7 +60,7 @@ FIELDNAMES = [
     "id", "title", "description", "publishedAt",
     "channelId", "channelTitle", "tags", "categoryId",
     "duration", "durationSeconds", "viewCount",
-    "commentCount", "definicion", "idioma_audio", "likeCount",
+    "commentCount", "definicion", "idioma_audio",
 ]
 
 OUTPUT_DIR = os.path.join(_BASEDIR, "dataset", "channels")
@@ -103,7 +103,6 @@ def extract(item: dict) -> dict:
         "definicion":      cd.get("definition", ""),
         "idioma_audio":    (sn.get("defaultAudioLanguage")
                             or sn.get("defaultLanguage") or ""),
-        "likeCount":       int(st.get("likeCount") or 0),
     }
 
 
