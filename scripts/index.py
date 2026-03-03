@@ -25,6 +25,7 @@ import json
 import csv
 import re
 import argparse
+import calendar
 import requests
 
 # ── Cargar .env ──────────────────────────────────────────────────────────────
@@ -63,6 +64,9 @@ QUERIES = [
     "entertainment show", "talent show", "funny moments", "best of",
     "top entertainment",
 ]
+
+# Proporción objetivo shorts:longs (p.ej. 2.0 → 2 shorts por cada largo, ~67% shorts)
+TARGET_RATIO = 2.0
 
 FIELDNAMES = [
     "id", "title", "description", "publishedAt",
@@ -229,29 +233,23 @@ class Pipeline:
         return q
 
     def _duration_filter(self):
-        """Selecciona filtro videoDuration para favorecer el tipo minoritario.
+        """Selecciona filtro videoDuration priorizando shorts (≤1 min).
 
         YouTube API videoDuration values:
-          'short'  → <4 min  (contiene nuestros shorts <60s y parte de largos 1-4min)
+          'short'  → <4 min  (contiene nuestros shorts ≤60s)
           'medium' → 4-20 min (contiene largos 4-16min)
-          'any'    → sin filtro
 
-        Estrategia: si un tipo supera 1.5× al otro, priorizamos el tipo
-        minoritario con el filtro de duración más favorable.
+        Estrategia: buscar siempre con 'short' a menos que los shorts
+        ya superen TARGET_RATIO veces los largos, en cuyo caso buscamos
+        'medium' para reequilibrar.
         """
         s, l = self.counts["short"], self.counts["long"]
-        if s == 0 and l == 0:
-            return None  # sin filtro al inicio
-        if s > 0 and l > 0:
-            if s / l > 1.5:
-                return "medium"   # necesitamos más largos (4-20min)
-            if l / s > 1.5:
-                return "short"    # necesitamos más shorts (<4min)
-        elif s > 0 and l == 0:
-            return "medium"
-        elif l > 0 and s == 0:
+        # Si no hay largos, o los shorts aún no alcanzan el ratio objetivo
+        # → seguir priorizando shorts
+        if l == 0 or (s / l) < TARGET_RATIO:
             return "short"
-        return None  # balanceado, sin filtro
+        # Shorts ya superan TARGET_RATIO × largos → buscar largos
+        return "medium"
 
     # ── API wrappers ─────────────────────────────────────────────────────
     def _api_search(self, query, page_token=None, published_after=None,
@@ -376,13 +374,17 @@ class Pipeline:
                 self.seen.add(vid)
                 continue
 
-            # Balance 50/50: si un tipo supera 2× al otro, lo descartamos
+            # Balance con prioridad a shorts: descartar si se supera el ratio objetivo
             other = "long" if cat == "short" else "short"
-            if (self.counts[cat] > 0 and self.counts[other] > 0
-                    and self.counts[cat] / self.counts[other] > 2.0):
-                self._log("SKIP: imbalance drop", cat, vid)
-                self.seen.add(vid)
-                continue
+            if self.counts[cat] > 0 and self.counts[other] > 0:
+                ratio = self.counts[cat] / self.counts[other]
+                # Para shorts: tolerar hasta TARGET_RATIO × largos
+                # Para largos: tolerar hasta 1/TARGET_RATIO × shorts
+                limit = TARGET_RATIO if cat == "short" else (1.0 / TARGET_RATIO)
+                if ratio > limit * 1.5:  # margen del 50% antes de descartar
+                    self._log("SKIP: imbalance drop", cat, vid)
+                    self.seen.add(vid)
+                    continue
 
             # Añadir
             self._wr.writerow({k: rec.get(k, "") for k in FIELDNAMES})
@@ -481,18 +483,24 @@ class Pipeline:
         if self.verbose:
             print("Verbose mode: detailed pipeline logging enabled")
 
-        # Priorizar búsquedas por año según YEARS_PRIORITY
+        # Priorizar búsquedas por año según YEARS_PRIORITY,
+        # iterando mes a mes de diciembre a enero
         for y in YEARS_PRIORITY:
             if not self._can_page():
                 break
-            pa = f"{y}-01-01T00:00:00Z"
-            pb = f"{y}-12-31T23:59:59Z"
-            print(f"\n► Prioridad año – {y} ({pa[:10]} → {pb[:10]})")
-            p, exc = self._crawl("year", published_after=pa, published_before=pb)
-            total_pages += p
-            if exc:
-                self._finish(total_pages)
-                return
+            print(f"\n► Prioridad año – {y} (diciembre → enero)")
+            for month in range(12, 0, -1):
+                if not self._can_page():
+                    break
+                last_day = calendar.monthrange(int(y), month)[1]
+                pa = f"{y}-{month:02d}-01T00:00:00Z"
+                pb = f"{y}-{month:02d}-{last_day:02d}T23:59:59Z"
+                print(f"  ↳ {y}-{month:02d} ({pa[:10]} → {pb[:10]})")
+                p, exc = self._crawl("year", published_after=pa, published_before=pb)
+                total_pages += p
+                if exc:
+                    self._finish(total_pages)
+                    return
 
         # Si queda cuota, permitir una pasada general (retrocompatible)
         if self._can_page():
