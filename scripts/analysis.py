@@ -5134,12 +5134,12 @@ def main() -> None:
  	
 	df_filtrados, df_restantes = filter_videos_by_properties(
 		df,
-		title_word_intervals=[(3, 8)],
-		hour_intervals=[(18, 23)],
-		days_list=["Lunes", "Martes", "Miércoles", "Jueves", "Viernes"],
-		duration_intervals=[(60, 960)],
-		tag_count_intervals=[(3, 15)],
-		duration_filter_mode=2,
+		title_word_intervals=[(4, 6), (16, 18), (7, 9)],
+		hour_intervals=[(10, 12), (12, 14), (4, 6), (20, 22), (16, 18), (22, 24), (0, 2)],
+		days_list=["Lunes", "Martes", "Miércoles", "Jueves"],
+		duration_intervals=[(45, 50), (50, 60), (30, 40), (5, 10)],
+		tag_count_intervals=[(21, 30), (41, 60)],
+		duration_filter_mode=1,
 	)
 
 	monte_carlo_two_datasets(
