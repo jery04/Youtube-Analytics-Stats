@@ -3200,6 +3200,10 @@ def monte_carlo_duration_intervals(
 				f.write(f"{label:<18}{count_val:>8,}{wins_count:>12,}{pct:>9.2f}%\n")
 		print(f"Datos guardados: {txt_path}")
 
+	# ── Bins adicionales para videos ≤ 1 min ───────────────────────────
+	le1min_bins_v1 = [(0, 10), (11, 20), (20, 30), (30, 45), (45, 60)]
+	le1min_bins_v2 = [(0, 15), (15, 30), (30, 45), (45, 60)]
+
 	# ── Ejecutar simulaciones ───────────────────────────────────────────
 	print(f"\n{'='*60}")
 	print(f"Monte Carlo – Intervalos de duración ({n_rounds:,} rondas)")
@@ -3230,6 +3234,32 @@ def monte_carlo_duration_intervals(
 		)
 		_save_txt(res_min, "monte_carlo_minutes", "Monte Carlo – Intervalos en Minutos", counts=counts_min)
 		results_all["minutes"] = res_min
+
+	# 3) ≤1 min – bins v1: (0,10), (11,20), (20,30), (30,45), (45,60)
+	print("→ Simulación ≤1 min con bins v1...")
+	res_le1_v1, counts_le1_v1 = _run_simulation(le1min_bins_v1, unit="s")
+	if res_le1_v1:
+		_plot_histogram(
+			res_le1_v1,
+			f"Monte Carlo – ≤1 min bins v1\n{n_rounds:,} rondas",
+			"monte_carlo_seconds_le1min_v1",
+		)
+		_save_txt(res_le1_v1, "monte_carlo_seconds_le1min_v1",
+				  "Monte Carlo – ≤1 min bins v1", counts=counts_le1_v1)
+		results_all["le1min_v1"] = res_le1_v1
+
+	# 4) ≤1 min – bins v2: (0,15), (15,30), (30,45), (45,60)
+	print("→ Simulación ≤1 min con bins v2...")
+	res_le1_v2, counts_le1_v2 = _run_simulation(le1min_bins_v2, unit="s")
+	if res_le1_v2:
+		_plot_histogram(
+			res_le1_v2,
+			f"Monte Carlo – ≤1 min bins v2\n{n_rounds:,} rondas",
+			"monte_carlo_seconds_le1min_v2",
+		)
+		_save_txt(res_le1_v2, "monte_carlo_seconds_le1min_v2",
+				  "Monte Carlo – ≤1 min bins v2", counts=counts_le1_v2)
+		results_all["le1min_v2"] = res_le1_v2
 
 	print(f"{'='*60}\n")
 	return results_all
