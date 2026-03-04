@@ -26,6 +26,7 @@ import csv
 import re
 import argparse
 import calendar
+import datetime
 import requests
 
 # ── Cargar .env ──────────────────────────────────────────────────────────────
@@ -76,12 +77,9 @@ FIELDNAMES = [
 ]
 
 # Limitar búsquedas a este rango (inclusive)
-# Ampliado a 2024-2026
-YEAR_START = "2024-01-01T00:00:00Z"
+# Desde enero 2025 hasta fin de 2026
+YEAR_START = "2025-01-01T00:00:00Z"
 YEAR_END = "2026-12-31T23:59:59Z"
-
-# Prioridad explícita de años (procesar en este orden)
-YEARS_PRIORITY = ["2025", "2024", "2026"]
 
 # ── Utilidades ───────────────────────────────────────────────────────────────
 def parse_duration(iso):
@@ -483,24 +481,35 @@ class Pipeline:
         if self.verbose:
             print("Verbose mode: detailed pipeline logging enabled")
 
-        # Priorizar búsquedas por año según YEARS_PRIORITY,
-        # iterando mes a mes de diciembre a enero
-        for y in YEARS_PRIORITY:
+        # Construir lista de (año, mes) desde hoy hacia atrás hasta enero 2025
+        today = datetime.date.today()
+        STOP_YEAR, STOP_MONTH = 2025, 1
+
+        year_months = []
+        y, m = today.year, today.month
+        while (y, m) >= (STOP_YEAR, STOP_MONTH):
+            year_months.append((y, m))
+            m -= 1
+            if m == 0:
+                m = 12
+                y -= 1
+
+        print(f"\n► Recorrido cronológico descendente: "
+              f"{year_months[0][0]}-{year_months[0][1]:02d} → "
+              f"{year_months[-1][0]}-{year_months[-1][1]:02d}")
+
+        for y, month in year_months:
             if not self._can_page():
                 break
-            print(f"\n► Prioridad año – {y} (diciembre → enero)")
-            for month in range(12, 0, -1):
-                if not self._can_page():
-                    break
-                last_day = calendar.monthrange(int(y), month)[1]
-                pa = f"{y}-{month:02d}-01T00:00:00Z"
-                pb = f"{y}-{month:02d}-{last_day:02d}T23:59:59Z"
-                print(f"  ↳ {y}-{month:02d} ({pa[:10]} → {pb[:10]})")
-                p, exc = self._crawl("year", published_after=pa, published_before=pb)
-                total_pages += p
-                if exc:
-                    self._finish(total_pages)
-                    return
+            last_day = calendar.monthrange(y, month)[1]
+            pa = f"{y}-{month:02d}-01T00:00:00Z"
+            pb = f"{y}-{month:02d}-{last_day:02d}T23:59:59Z"
+            print(f"  ↳ {y}-{month:02d} ({pa[:10]} → {pb[:10]})")
+            p, exc = self._crawl("year", published_after=pa, published_before=pb)
+            total_pages += p
+            if exc:
+                self._finish(total_pages)
+                return
 
         # Si queda cuota, permitir una pasada general (retrocompatible)
         if self._can_page():
