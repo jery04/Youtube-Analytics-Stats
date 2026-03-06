@@ -481,22 +481,11 @@ class Pipeline:
         if self.verbose:
             print("Verbose mode: detailed pipeline logging enabled")
 
-        # Construir lista de (año, mes) desde hoy hacia atrás hasta enero 2025
-        today = datetime.date.today()
-        STOP_YEAR, STOP_MONTH = 2025, 1
+        # Orden de meses priorizado: febrero 2026 → enero 2026 → marzo 2026
+        year_months = [(2026, 2), (2026, 1), (2026, 3)]
 
-        year_months = []
-        y, m = today.year, today.month
-        while (y, m) >= (STOP_YEAR, STOP_MONTH):
-            year_months.append((y, m))
-            m -= 1
-            if m == 0:
-                m = 12
-                y -= 1
-
-        print(f"\n► Recorrido cronológico descendente: "
-              f"{year_months[0][0]}-{year_months[0][1]:02d} → "
-              f"{year_months[-1][0]}-{year_months[-1][1]:02d}")
+        print(f"\n► Recorrido por orden de prioridad: "
+              f"feb-2026 → ene-2026 → mar-2026")
 
         for y, month in year_months:
             if not self._can_page():
