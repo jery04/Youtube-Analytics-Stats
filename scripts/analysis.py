@@ -5643,7 +5643,7 @@ def main() -> None:
 	viralidad_dir = os.path.join(root, 'outputs', 'Viralidad')
 	os.makedirs(viralidad_dir, exist_ok=True)
 
-	analyze_virality_ratio(df, min_videos=50, k=3, output_dir=viralidad_dir)
+	analyze_virality_ratio(df, min_videos=50, k=5, output_dir=viralidad_dir)
 
 	#--------------------------------------------------
 	# CRECIMIENTO DE VISTAS POR EDAD
