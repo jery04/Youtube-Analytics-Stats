@@ -5047,6 +5047,458 @@ def filter_videos_by_properties(df, title_word_intervals=None, hour_intervals=No
 
 	return filtered, remainder
 
+# Análisis de viralidad por canal
+def analyze_virality_ratio(
+	df: pd.DataFrame,
+	min_videos: int = 50,
+	k: float = 1.5,
+	root=None,
+	output_dir=None,
+	file_suffix=None,
+	save: bool = True,
+	show: bool = False,
+) -> pd.DataFrame | None:
+	"""
+	Calcula el ratio de viralidad por canal y el promedio ponderado global.
+
+	Un video se considera "viral" si su viewCount > Q3 + k×IQR, donde Q3 es
+	el tercer cuartil de vistas del canal, IQR = Q3 − Q1 y k es el factor de
+	holgura (predeterminado 1.5).
+
+	Para evitar falsos outliers (videos que superan el umbral pero forman
+	parte de la cola natural de la distribución), se aplica una confirmación
+	basada en saltos (gap-based filtering): se ordenan las vistas del canal,
+	y solo se cuentan como verdaderamente virales aquellos videos que estén
+	separados del resto por un salto ≥ IQR en la secuencia ordenada.  Si los
+	valores por encima del umbral transicionan suavemente desde la masa de
+	datos (sin un salto significativo), se consideran falsos outliers.
+
+	Solo se incluyen canales con más de `min_videos` videos.
+
+	Pasos:
+	  1. Para cada canal elegible se calcula Q3 de viewCount y el umbral.
+	  2. Se ordenan las vistas y se identifican candidatos (vistas > umbral).
+	  3. Se recorren los saltos entre valores consecutivos desde el último
+	     valor ≤ umbral; solo los videos tras el primer salto ≥ IQR son
+	     verdaderamente virales (confirmación de gap).
+	  4. Se obtiene el ratio de viralidad por canal = virales / total.
+	  5. Se calcula el promedio ponderado global =
+	     Σ(virales_i) / Σ(total_i) sobre todos los canales elegibles.
+
+	Args:
+		df:          DataFrame con columnas channelTitle (o similar) y viewCount.
+		min_videos:  Mínimo de videos para que un canal sea incluido (default 50).
+		k:           Factor de holgura sobre IQR para definir "viral" (default 1.5).
+		root:        Directorio raíz del proyecto.
+		output_dir:  Directorio de salida; por defecto outputs/Viralidad.
+		file_suffix: Sufijo para los archivos de salida.
+		save:        Si True, guarda PNG y TXT.
+		show:        Si True, muestra el gráfico en pantalla.
+
+	Returns:
+		DataFrame con columnas: canal, total_videos, q3_views, umbral_viral,
+		videos_virales, ratio_viralidad.  Última fila = TOTAL PONDERADO.
+		None si no hay datos válidos.
+	"""
+	if root is None:
+		root = Path(__file__).resolve().parents[1]
+	outputs_root = root / "outputs"
+	outputs_root.mkdir(parents=True, exist_ok=True)
+	if output_dir is None:
+		script_dir = outputs_root / "Viralidad"
+	else:
+		script_dir = Path(output_dir)
+	script_dir.mkdir(parents=True, exist_ok=True)
+
+	df = df.copy()
+
+	# ── Detectar columna de canal ────────────────────────────────────────
+	channel_candidates = [
+		"channelTitle", "canal", "canal_id", "channel", "channel_name",
+		"channel_title", "nombre_canal", "uploader", "creator",
+	]
+	channel_col = None
+	for c in channel_candidates:
+		if c in df.columns:
+			channel_col = c
+			break
+	if channel_col is None:
+		for c in df.columns:
+			if re.search(r"canal|channel|uploader|creator", c, re.I):
+				channel_col = c
+				break
+	if channel_col is None:
+		print("No se encontró una columna de canal para el análisis de viralidad.")
+		return None
+
+	# ── Detectar columna de vistas ───────────────────────────────────────
+	view_candidates = ["viewCount", "views", "vistas", "view_count"]
+	view_col = None
+	for c in view_candidates:
+		if c in df.columns:
+			view_col = c
+			break
+	if view_col is None:
+		for c in df.columns:
+			if re.search(r"view|vista", c, re.I):
+				view_col = c
+				break
+	if view_col is None:
+		print("No se encontró una columna de vistas para el análisis de viralidad.")
+		return None
+
+	# ── Limpieza ─────────────────────────────────────────────────────────
+	df[channel_col] = df[channel_col].astype(str).str.strip()
+	df[view_col] = pd.to_numeric(df[view_col], errors="coerce")
+	df = df.dropna(subset=[channel_col, view_col])
+	df = df[df[channel_col] != ""]
+
+	if df.empty:
+		print("No hay datos válidos para el análisis de viralidad.")
+		return None
+
+	# ── Filtrar canales con más de min_videos ────────────────────────────
+	channel_counts = df[channel_col].value_counts()
+	eligible_channels = channel_counts[channel_counts > min_videos].index
+	if eligible_channels.empty:
+		print(f"Ningún canal tiene más de {min_videos} videos.")
+		return None
+
+	df = df[df[channel_col].isin(eligible_channels)]
+
+	# ── Cálculo por canal ────────────────────────────────────────────────
+	rows = []
+	for canal, grp in df.groupby(channel_col):
+		views = grp[view_col]
+		q1 = views.quantile(0.25)
+		q3 = views.quantile(0.75)
+		iqr = q3 - q1
+		umbral = q3 + k * iqr
+		total = len(grp)
+
+		# ── Filtrar falsos outliers mediante detección de saltos ────────
+		# Solo se cuentan como virales los videos que, además de superar el
+		# umbral, están separados de la masa de datos por un salto ≥ IQR
+		# en la secuencia ordenada de vistas.
+		if iqr > 0:
+			sorted_views = np.sort(views.values)
+			candidates = sorted_views[sorted_views > umbral]
+			if len(candidates) == 0:
+				virales = 0
+			else:
+				non_candidates = sorted_views[sorted_views <= umbral]
+				if len(non_candidates) > 0:
+					sequence = np.concatenate([[non_candidates[-1]], candidates])
+				else:
+					sequence = candidates
+				gaps = np.diff(sequence)
+				virales = 0
+				for idx, gap in enumerate(gaps):
+					if gap >= iqr:
+						virales = len(candidates) - idx
+						break
+		else:
+			virales = 0
+
+		ratio = virales / total if total > 0 else 0.0
+		rows.append({
+			"canal": canal,
+			"total_videos": total,
+			"q3_views": round(q3, 2),
+			"umbral_viral": round(umbral, 2),
+			"videos_virales": virales,
+			"ratio_viralidad": round(ratio, 6),
+		})
+
+	result_df = pd.DataFrame(rows).sort_values("ratio_viralidad", ascending=False)
+
+	# ── Promedio ponderado global ────────────────────────────────────────
+	sum_virales = result_df["videos_virales"].sum()
+	sum_total = result_df["total_videos"].sum()
+	ratio_global = sum_virales / sum_total if sum_total > 0 else 0.0
+
+	global_row = pd.DataFrame([{
+		"canal": "── TOTAL PONDERADO ──",
+		"total_videos": int(sum_total),
+		"q3_views": np.nan,
+		"umbral_viral": np.nan,
+		"videos_virales": int(sum_virales),
+		"ratio_viralidad": round(ratio_global, 6),
+	}])
+	result_df = pd.concat([result_df, global_row], ignore_index=True)
+
+	# ── Consola ──────────────────────────────────────────────────────────
+	print(f"\n{'='*70}")
+	print(f"Análisis de Viralidad  (min_videos={min_videos}, k={k})")
+	print(f"{'='*70}")
+	print(f"Canales elegibles: {len(eligible_channels)}")
+	print(f"Total de videos analizados: {sum_total:,}")
+	print(f"Total de videos virales: {sum_virales:,}")
+	print(f"Ratio de viralidad ponderado global: {ratio_global:.4%}")
+	print(f"\nDetalle por canal (ordenado de mayor a menor ratio):")
+	for _, r in result_df.iterrows():
+		if r["canal"] == "── TOTAL PONDERADO ──":
+			continue
+		print(f"  {r['canal'][:35]:<36} "
+			  f"total={int(r['total_videos']):>6,}  "
+			  f"umbral={r['umbral_viral']:>12,.0f}  "
+			  f"virales={int(r['videos_virales']):>5,}  "
+			  f"ratio={r['ratio_viralidad']:.4%}")
+	print(f"\n  {'── TOTAL PONDERADO ──':<36} "
+		  f"total={sum_total:>6,}  "
+		  f"{'':>12}  "
+		  f"virales={sum_virales:>5,}  "
+		  f"ratio={ratio_global:.4%}")
+
+	# ── Preparar sufijo ──────────────────────────────────────────────────
+	suffix = f"_{re.sub(r'\\W+', '_', str(file_suffix)).strip('_')}" if file_suffix else ""
+
+	# ── Gráfico de barras horizontales ───────────────────────────────────
+	plot_df = result_df[result_df["canal"] != "── TOTAL PONDERADO ──"].copy()
+	plot_df = plot_df.sort_values("ratio_viralidad", ascending=True)
+
+	fig, ax = plt.subplots(figsize=(12, max(6, len(plot_df) * 0.45)))
+	bars = ax.barh(
+		plot_df["canal"].str[:30],
+		plot_df["ratio_viralidad"] * 100,
+		color=plt.cm.viridis(np.linspace(0.25, 0.85, len(plot_df))),
+		edgecolor="white",
+		linewidth=0.5,
+	)
+	# Línea del ratio global
+	ax.axvline(ratio_global * 100, color="red", linestyle="--", linewidth=1.2,
+			   label=f"Promedio ponderado: {ratio_global:.2%}")
+
+	for bar in bars:
+		width = bar.get_width()
+		ax.text(width + 0.3, bar.get_y() + bar.get_height() / 2,
+				f"{width:.2f}%", va="center", fontsize=9)
+
+	ax.set_xlabel("Ratio de viralidad (%)", fontsize=12)
+	ax.set_title(f"Ratio de Viralidad por Canal  (umbral = Q3 + {k}×IQR, mín {min_videos} videos)",
+				 fontsize=14)
+	ax.legend(fontsize=11)
+	plt.tight_layout()
+
+	if save:
+		png_path = script_dir / f"virality_ratio{suffix}.png"
+		plt.savefig(png_path, dpi=150)
+		print(f"\nGráfico guardado en {png_path}")
+
+		txt_path = script_dir / f"virality_ratio{suffix}.txt"
+		with open(txt_path, "w", encoding="utf-8") as f:
+			f.write(f"Análisis de Viralidad  (min_videos={min_videos}, k={k})\n")
+			f.write(f"Canales elegibles: {len(eligible_channels)}\n")
+			f.write(f"Ratio ponderado global: {ratio_global:.6f} ({ratio_global:.4%})\n\n")
+			header = (f"{'Canal':<35} {'Total':>7} {'Q3+k·IQR':>12} "
+					  f"{'Virales':>8} {'Ratio':>10}\n")
+			f.write(header)
+			f.write("-" * len(header) + "\n")
+			for _, r in result_df.iterrows():
+				umb_str = f"{r['umbral_viral']:>12,.0f}" if pd.notna(r["umbral_viral"]) else f"{'':>12}"
+				f.write(f"{str(r['canal'])[:35]:<35} {int(r['total_videos']):>7,} "
+						f"{umb_str} "
+						f"{int(r['videos_virales']):>8,} "
+						f"{r['ratio_viralidad']:>9.4%}\n")
+		print(f"Datos guardados en {txt_path}")
+
+	if show:
+		plt.show()
+	plt.close()
+
+	return result_df
+
+# Análisis de crecimiento de vistas por edad del video
+def analyze_views_growth_by_age(
+	df: pd.DataFrame,
+	root=None,
+	output_dir=None,
+	file_suffix=None,
+	min_videos_per_bin: int = 30,
+	save: bool = True,
+	show: bool = False,
+) -> pd.DataFrame | None:
+	"""
+	Agrupa los videos por edad (semanas desde publicación) y calcula la mediana
+	de vistas por grupo.  Luego calcula la tasa de crecimiento entre grupos
+	consecutivos:  (V_t − V_(t−1)) / V_(t−1).
+
+	Esquema de grupos:
+	  1 sem, 2 sem, 3 sem, 1 mes, 1 mes y 1 sem, …, N meses y 3 sem.
+
+	Genera un gráfico de barras con el % de crecimiento por intervalo.
+
+	Args:
+		df:                 DataFrame con columnas publishedAt y viewCount.
+		root:               Directorio raíz del proyecto.
+		output_dir:         Directorio de salida (default: outputs/Crecimiento).
+		file_suffix:        Sufijo para archivos de salida.
+		min_videos_per_bin: Mínimo de videos por grupo para incluirlo.
+		save:               Si True, guarda PNG y TXT.
+		show:               Si True, muestra el gráfico en pantalla.
+
+	Returns:
+		DataFrame con columnas: label, age_days, median_views, videos_count,
+		growth_pct.  None si no hay datos válidos.
+	"""
+	if root is None:
+		root = Path(__file__).resolve().parents[1]
+	outputs_root = root / "outputs"
+	outputs_root.mkdir(parents=True, exist_ok=True)
+	if output_dir is None:
+		script_dir = outputs_root / "Crecimiento"
+	else:
+		script_dir = Path(output_dir)
+	script_dir.mkdir(parents=True, exist_ok=True)
+
+	df = df.copy()
+
+	# ── Detectar columnas ────────────────────────────────────────────────
+	if "publishedAt" not in df.columns:
+		print("No se encontró la columna 'publishedAt'.")
+		return None
+	view_col = None
+	for c in ["viewCount", "views", "vistas", "view_count"]:
+		if c in df.columns:
+			view_col = c
+			break
+	if view_col is None:
+		print("No se encontró una columna de vistas.")
+		return None
+
+	# ── Parsear fechas y calcular edad en días ───────────────────────────
+	df["_pub"] = pd.to_datetime(df["publishedAt"], utc=True, errors="coerce")
+	df = df.dropna(subset=["_pub", view_col])
+	df[view_col] = pd.to_numeric(df[view_col], errors="coerce")
+	df = df.dropna(subset=[view_col])
+
+	reference_date = df["_pub"].max()
+	df["_age_days"] = (reference_date - df["_pub"]).dt.days
+
+	# ── Construir bins semanales ─────────────────────────────────────────
+	max_age = int(df["_age_days"].max())
+	max_weeks = max_age // 7 + 1
+
+	def _week_label(i: int) -> str:
+		"""Etiqueta legible para el bin semanal i (0-based)."""
+		if i < 3:
+			return f"{i + 1} sem"
+		offset = i - 3
+		month = offset // 4 + 1
+		week = offset % 4
+		m_str = f"{month} mes" if month == 1 else f"{month} meses"
+		if week == 0:
+			return m_str
+		return f"{m_str} y {week} sem"
+
+	# Asignar bin semanal (0-based): edad 0-6 → bin 0, 7-13 → bin 1, …
+	df["_week_bin"] = df["_age_days"] // 7
+
+	# ── Mediana de vistas por bin ────────────────────────────────────────
+	grouped = (
+		df.groupby("_week_bin")[view_col]
+		.agg(median_views="median", videos_count="count")
+		.reset_index()
+		.rename(columns={"_week_bin": "week_bin"})
+	)
+
+	# Filtrar bins con pocos videos
+	grouped = grouped[grouped["videos_count"] >= min_videos_per_bin].copy()
+	grouped = grouped.sort_values("week_bin").reset_index(drop=True)
+
+	if len(grouped) < 2:
+		print("No hay suficientes grupos con datos para calcular crecimiento.")
+		return None
+
+	# Etiquetas y días
+	grouped["label"] = grouped["week_bin"].apply(_week_label)
+	grouped["age_days"] = grouped["week_bin"] * 7
+
+	# ── Tasa de crecimiento ──────────────────────────────────────────────
+	grouped["growth_pct"] = (
+		grouped["median_views"].pct_change() * 100
+	)  # (V_t - V_(t-1)) / V_(t-1) × 100
+
+	print(f"\n{'─'*60}")
+	print("Crecimiento de vistas por edad del video")
+	print(f"{'─'*60}")
+	print(f"{'Edad':<22} {'Mediana':>12} {'Videos':>8} {'Δ%':>10}")
+	print(f"{'─'*22} {'─'*12} {'─'*8} {'─'*10}")
+	for _, r in grouped.iterrows():
+		g = f"{r['growth_pct']:>+9.2f}%" if pd.notna(r["growth_pct"]) else "       —"
+		print(
+			f"{r['label']:<22} {r['median_views']:>12,.0f} "
+			f"{int(r['videos_count']):>8,} {g}"
+		)
+	print(f"{'─'*60}")
+
+	# ── Gráfico ──────────────────────────────────────────────────────────
+	plot_df = grouped.dropna(subset=["growth_pct"]).copy()
+
+	fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(max(14, len(grouped) * 0.5), 12),
+									gridspec_kw={"height_ratios": [1, 1.3]})
+
+	# ---- Subplot 1: Mediana de vistas por edad ----
+	ax1.plot(
+		grouped["label"], grouped["median_views"],
+		marker="o", linewidth=2, color="#2196F3", markersize=6,
+	)
+	ax1.set_ylabel("Mediana de vistas", fontsize=12)
+	ax1.set_title("Mediana de vistas según edad del video", fontsize=14, weight="bold")
+	ax1.tick_params(axis="x", rotation=90, labelsize=8)
+	ax1.grid(axis="y", alpha=0.3)
+
+	# ---- Subplot 2: % de crecimiento semanal ----
+	colors = ["#4CAF50" if v >= 0 else "#F44336" for v in plot_df["growth_pct"]]
+	bars = ax2.bar(plot_df["label"], plot_df["growth_pct"], color=colors, edgecolor="white", linewidth=0.5)
+
+	# Anotar valores sobre las barras
+	for bar, val in zip(bars, plot_df["growth_pct"]):
+		y = bar.get_height()
+		ax2.text(
+			bar.get_x() + bar.get_width() / 2,
+			y + (0.5 if y >= 0 else -1.5),
+			f"{val:+.1f}%",
+			ha="center", va="bottom" if y >= 0 else "top",
+			fontsize=7, weight="bold",
+		)
+
+	ax2.axhline(0, color="black", linewidth=0.8)
+	ax2.set_ylabel("Crecimiento %  (V_t − V_{t−1}) / V_{t−1}", fontsize=12)
+	ax2.set_xlabel("Edad del video", fontsize=12)
+	ax2.set_title(
+		"% de crecimiento de vistas entre periodos consecutivos",
+		fontsize=14, weight="bold",
+	)
+	ax2.tick_params(axis="x", rotation=90, labelsize=8)
+	ax2.grid(axis="y", alpha=0.3)
+
+	plt.tight_layout()
+
+	# ── Guardar ──────────────────────────────────────────────────────────
+	suffix = f"_{re.sub(r'\\W+', '_', str(file_suffix)).strip('_')}" if file_suffix else ""
+
+	if save:
+		png_path = script_dir / f"views_growth_by_age{suffix}.png"
+		plt.savefig(png_path, dpi=150, bbox_inches="tight")
+		print(f"Gráfico guardado en {png_path}")
+
+		txt_path = script_dir / f"views_growth_by_age{suffix}.txt"
+		with open(txt_path, "w", encoding="utf-8") as f:
+			f.write("label,age_days,median_views,videos_count,growth_pct\n")
+			for _, r in grouped.iterrows():
+				g = f"{r['growth_pct']:.4f}" if pd.notna(r["growth_pct"]) else ""
+				f.write(
+					f"{r['label']},{int(r['age_days'])},"
+					f"{r['median_views']:.2f},{int(r['videos_count'])},{g}\n"
+				)
+		print(f"Datos guardados en {txt_path}")
+
+	if show:
+		plt.show()
+	plt.close()
+
+	return grouped[["label", "age_days", "median_views", "videos_count", "growth_pct"]]
 
 # Función principal para ejecutar el análisis
 def main() -> None:
@@ -5185,6 +5637,21 @@ def main() -> None:
 		show=False,
 	)
 
+	#--------------------------------------------------
+	# VIRALIDAD
+	#--------------------------------------------------
+	viralidad_dir = os.path.join(root, 'outputs', 'Viralidad')
+	os.makedirs(viralidad_dir, exist_ok=True)
+
+	analyze_virality_ratio(df, min_videos=50, k=3, output_dir=viralidad_dir)
+
+	#--------------------------------------------------
+	# CRECIMIENTO DE VISTAS POR EDAD
+	#--------------------------------------------------
+	crecimiento_dir = os.path.join(root, 'outputs', 'Crecimiento')
+	os.makedirs(crecimiento_dir, exist_ok=True)
+
+	analyze_views_growth_by_age(df, output_dir=crecimiento_dir)
 
 
 if __name__ == '__main__':
