@@ -54,6 +54,7 @@ VIDEOS_URL   = "https://www.googleapis.com/youtube/v3/videos"
 TARGET_CHANNELS = [
     ("Curiosidades al descubierto", "@Curiosidadesaldescubierto"),
     ("Curiosidades IA",             "@curiosidadesai-y1t"),
+    ("¿Sabías Esto..?",             "@SabíasEsto_27"),
 ]
 
 FIELDNAMES = [

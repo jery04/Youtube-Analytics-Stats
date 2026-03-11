@@ -481,11 +481,11 @@ class Pipeline:
         if self.verbose:
             print("Verbose mode: detailed pipeline logging enabled")
 
-        # Orden de meses priorizado: febrero 2026 → enero 2026 → marzo 2026
-        year_months = [(2026, 2), (2026, 1), (2026, 3)]
 
-        print(f"\n► Recorrido por orden de prioridad: "
-              f"feb-2026 → ene-2026 → mar-2026")
+        # Orden de meses: desde marzo 2026 hasta enero 2026
+        year_months = [(2026, m) for m in range(3, 0, -1)]
+
+        print(f"\n► Recorrido por orden de prioridad: mar-2026 → feb-2026 → ene-2026")
 
         for y, month in year_months:
             if not self._can_page():
