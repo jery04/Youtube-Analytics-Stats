@@ -4845,10 +4845,11 @@ def filter_videos_by_properties(df, title_word_intervals=None, hour_intervals=No
 		days_list: lista de días en español, p.ej. ["Lunes","Martes",...].
 		duration_intervals: lista de tuplas (a,b) en segundos.
 		tag_count_intervals: lista de tuplas (a,b) para cantidad de tags.
-		duration_filter_mode: int (1|2|3).
+		duration_filter_mode: int (1|2|3|4).
 			1 → trabaja solo con videos de duración <= 60 s  (≤ 1 min).
 			2 → trabaja solo con videos de duración (60, 960] s  (1 min–16 min].
 			3 → sin prefiltro de duración (por defecto).
+			4 → trabaja solo con videos de duración < 180 s  (< 3 min).
 
 	Returns:
 		(filtered_df, remainder_df)
@@ -4965,7 +4966,7 @@ def filter_videos_by_properties(df, title_word_intervals=None, hour_intervals=No
 		return len(parts)
 
 	# ── Prefiltro por duration_filter_mode ───────────────────────────────
-	if int(duration_filter_mode) in (1, 2) and duration_col and duration_col in df.columns:
+	if int(duration_filter_mode) in (1, 2, 4) and duration_col and duration_col in df.columns:
 		dur_secs = df[duration_col].apply(to_seconds).fillna(-1).astype(int)
 		if int(duration_filter_mode) == 1:
 			# Solo videos con duración <= 60 s (≤ 1 min)
@@ -4973,6 +4974,9 @@ def filter_videos_by_properties(df, title_word_intervals=None, hour_intervals=No
 		elif int(duration_filter_mode) == 2:
 			# Solo videos con duración (60, 960] s  — (1 min, 16 min]
 			df = df[(dur_secs > 60) & (dur_secs <= 960)].copy()
+		elif int(duration_filter_mode) == 4:
+			# Solo videos con duración < 180 s  (< 3 min)
+			df = df[dur_secs < 180].copy()
 
 	# ── Construir máscara (True = cumple todos los filtros) ──────────────
 	mask = pd.Series(True, index=df.index)
@@ -5616,12 +5620,12 @@ def main() -> None:
  	
 	df_filtrados, df_restantes = filter_videos_by_properties(
 		df,
-		title_word_intervals=[(10, 18)],
-		hour_intervals=[(10, 16), (0, 6), (18, 24)],
-		days_list=[ "Martes", "Sábado", "Domingo", "Jueves"],
-		duration_intervals=[(20, 120)],
-		tag_count_intervals= None,
-		duration_filter_mode=3,
+		title_word_intervals=[(4, 6), (16, 18), (19, 21), (7, 9)],
+		hour_intervals=[(10, 12), (12, 14), (14, 16), (20, 22), (16, 18), (22, 24), (18, 20)],
+		days_list=[ "Viernes", "Miércoles", "Jueves"],
+		duration_intervals=[(45, 50), (50, 60), (20, 40)],
+		tag_count_intervals=[(21, 30), (41, 60)],
+		duration_filter_mode=4,
 	)
 
 	monte_carlo_two_datasets(
