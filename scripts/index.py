@@ -76,10 +76,10 @@ FIELDNAMES = [
     "viewCount", "commentCount", "definicion", "idioma_audio",
 ]
 
-# Limitar búsquedas a este rango (inclusive)
-# Desde enero 2025 hasta fin de 2026
-YEAR_START = "2025-01-01T00:00:00Z"
-YEAR_END = "2026-12-31T23:59:59Z"
+# Limitar búsquedas a 2026: desde enero de 2026 hasta la fecha actual (UTC).
+# No se descargarán videos de 2025.
+YEAR_START = "2026-01-01T00:00:00Z"
+YEAR_END = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
 # ── Utilidades ───────────────────────────────────────────────────────────────
 def parse_duration(iso):
@@ -241,13 +241,8 @@ class Pipeline:
         ya superen TARGET_RATIO veces los largos, en cuyo caso buscamos
         'medium' para reequilibrar.
         """
-        s, l = self.counts["short"], self.counts["long"]
-        # Si no hay largos, o los shorts aún no alcanzan el ratio objetivo
-        # → seguir priorizando shorts
-        if l == 0 or (s / l) < TARGET_RATIO:
-            return "short"
-        # Shorts ya superan TARGET_RATIO × largos → buscar largos
-        return "medium"
+        # Fuerza siempre búsqueda de shorts (0-60s).
+        return "short"
 
     # ── API wrappers ─────────────────────────────────────────────────────
     def _api_search(self, query, page_token=None, published_after=None,
@@ -482,10 +477,13 @@ class Pipeline:
             print("Verbose mode: detailed pipeline logging enabled")
 
 
-        # Orden de meses: desde marzo 2026 hasta enero 2026
-        year_months = [(2026, m) for m in range(3, 0, -1)]
+        # Orden de meses: desde el mes actual de 2026 hasta enero de 2026 (descendiente).
+        now = datetime.datetime.utcnow()
+        # Si estamos en 2026, arrancamos desde el mes actual; si no, cubrir todo 2026.
+        start_month = now.month if now.year == 2026 else 12
+        year_months = [(2026, m) for m in range(start_month, 0, -1)]
 
-        print(f"\n► Recorrido por orden de prioridad: mar-2026 → feb-2026 → ene-2026")
+        print(f"\n► Recorrido por orden de prioridad: mes {start_month}-2026 → mes 1-2026 (descendente)")
 
         for y, month in year_months:
             if not self._can_page():
