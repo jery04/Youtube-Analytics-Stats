@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 import seaborn as sns
 import numpy as np
 
@@ -722,8 +723,328 @@ def analyze_yearly_percentage(df, root=None, output_dir=None, file_suffix=None):
 	ser = pd.Series(data=counts.values, index=counts.index.astype(int))
 	return ser
 
+# Grafico poligonal: cantidad de videos publicados por mes
+def plot_videos_por_mes(df=None, csv_path=None, start_month='2025-01', end_month=None, root=None, output_dir=None, file_suffix=None, save=True, show=False):
+	"""
+	Genera una línea poligonal con la cantidad de videos publicados por mes
+	entre `start_month` y `end_month` (ambos inclusivos). Formato de meses: 'YYYY-MM'.
+	Si `df` es None se carga `dataset/videos.csv` por defecto.
+	Retorna un DataFrame con columnas `month` (YYYY-MM) y `count`.
+	"""
+	if root is None:
+		root = Path(__file__).resolve().parents[1]
+	outputs_root = root / "outputs"
+	outputs_root.mkdir(parents=True, exist_ok=True)
+	if output_dir is None:
+		script_dir = outputs_root / "EDA"
+	else:
+		script_dir = Path(output_dir)
+	script_dir.mkdir(parents=True, exist_ok=True)
+
+	# Cargar dataframe si es necesario
+	if df is None:
+		if csv_path is None:
+			csv_path = root / 'dataset' / 'videos.csv'
+		try:
+			df = pd.read_csv(csv_path, low_memory=False)
+		except Exception as e:
+			print(f"No se pudo cargar CSV desde {csv_path}: {e}")
+			return None
+
+	df = df.copy()
+
+	# Detectar columna de fecha/hora (heurístico ya usado en el módulo)
+	fallback_cols = [
+		"publish_time",
+		"publish_date",
+		"publishTimestamp",
+		"publishedAt",
+		"upload_time",
+		"uploaded_at",
+		"fecha_publicacion",
+		"fecha_publicación",
+		"fecha",
+		"published_at",
+	]
+	found = None
+	for c in fallback_cols:
+		if c in df.columns:
+			found = c
+			break
+	if not found:
+		for c in df.columns:
+			if re.search(r'publish|upload|date|time|fecha|publica|publicación|publicacion', c, re.I):
+				found = c
+				break
+	if not found:
+		print("No se encontró una columna de fecha/hora para plot_videos_por_mes.")
+		return None
+
+	# Parsear fechas
+	try:
+		df[found] = pd.to_datetime(df[found], format='mixed', errors='coerce')
+	except Exception:
+		df[found] = pd.to_datetime(df[found].astype(str), format='mixed', errors='coerce')
+
+	df = df.dropna(subset=[found])
+	if df.empty:
+		print("No hay datos válidos con fechas para plot_videos_por_mes.")
+		return None
+
+	# Normalizar diferencias de zona horaria: convertir a naive UTC si es necesario
+	try:
+		if pd.api.types.is_datetime64tz_dtype(df[found].dtype):
+			df[found] = df[found].dt.tz_convert('UTC').dt.tz_localize(None)
+	except Exception:
+		# En caso de cualquier problema con tz conversion, forzamos a naive sin cambiar zonas
+		try:
+			df[found] = df[found].dt.tz_localize(None)
+		except Exception:
+			pass
+
+	# Periodos de inicio y fin
+	try:
+		start = pd.Period(str(start_month), freq='M')
+	except Exception:
+		print(f"start_month inválido: {start_month}")
+		return None
+
+	if end_month is None:
+		now = pd.Timestamp.now()
+		end = pd.Period(now.strftime('%Y-%m'), freq='M')
+	else:
+		try:
+			end = pd.Period(str(end_month), freq='M')
+		except Exception:
+			print(f"end_month inválido: {end_month}")
+			return None
+
+	if end < start:
+		print("end_month debe ser igual o posterior a start_month.")
+		return None
+
+	# Filtrar por rango (incluir todo el mes final)
+	mask = (df[found] >= start.to_timestamp()) & (df[found] < (end + 1).to_timestamp())
+	df = df[mask]
+
+	# Agrupar por periodo mensual
+	df['__period'] = df[found].dt.to_period('M')
+	counts = df['__period'].value_counts().sort_index()
+
+	# Asegurar meses sin datos estén presentes
+	full = pd.period_range(start=start, end=end, freq='M')
+	counts = counts.reindex(full, fill_value=0)
+
+	# Preparar Serie para graficar
+	idx = counts.index.to_timestamp()
+	vals = counts.values
+
+	plt.figure(figsize=(12, 6))
+	sns.lineplot(x=idx, y=vals, marker='o', color='tab:blue')
+	plt.xlabel('Mes')
+	plt.ylabel('Cantidad de videos publicados')
+	plt.title(f'Videos publicados por mes ({str(start)} → {str(end)})')
+	plt.xticks(rotation=45)
+	pl_tight = plt.tight_layout()
+
+	suffix = f"_{re.sub(r'\\W+', '_', str(file_suffix)).strip('_')}" if file_suffix else ""
+	out_file = script_dir / f"monthly_videos{suffix}.png"
+	if save:
+		plt.savefig(out_file, dpi=150)
+		print(f"Gráfico mensual guardado en {out_file}")
+
+	# Guardar TXT con Month,Count
+	txt_file = script_dir / f"monthly_videos{suffix}.txt"
+	with open(txt_file, 'w', encoding='utf-8') as f:
+		f.write('Month,Count\n')
+		for per, cnt in counts.items():
+			f.write(f"{str(per)},{int(cnt)}\n")
+	print(f"Conteos mensuales guardados en {txt_file}")
+
+	if show:
+		plt.show()
+	plt.close()
+
+	res_df = pd.DataFrame({'month': [str(p) for p in counts.index], 'count': counts.values})
+	return res_df
+
+# Grafico poligonal: cantidad de videos publicados por semana
+def plot_videos_por_semana(df=None, csv_path=None, start_week='2026-01-01', end_week=None, root=None, output_dir=None, file_suffix=None, save=True, show=False):
+	"""
+	Genera una línea poligonal con la cantidad de videos publicados por semana
+	entre `start_week` y `end_week` (ambos inclusivos). `start_week` es la fecha
+	exacta donde debe comenzar el conteo (puede ser cualquier día). La primera
+	semana irá desde `start_week` hasta el primer domingo siguiente (inclusivo),
+	y las semanas siguientes se consideran de lunes a domingo (ambos inclusive).
+	Si `df` es None se carga `dataset/videos.csv` por defecto.
+	Retorna un DataFrame con columnas `week_start` y `count`.
+	"""
+	if root is None:
+		root = Path(__file__).resolve().parents[1]
+	outputs_root = root / "outputs"
+	outputs_root.mkdir(parents=True, exist_ok=True)
+	if output_dir is None:
+		script_dir = outputs_root / "EDA"
+	else:
+		script_dir = Path(output_dir)
+	script_dir.mkdir(parents=True, exist_ok=True)
+
+	# Cargar dataframe si es necesario
+	if df is None:
+		if csv_path is None:
+			csv_path = root / 'dataset' / 'videos.csv'
+		try:
+			df = pd.read_csv(csv_path, low_memory=False)
+		except Exception as e:
+			print(f"No se pudo cargar CSV desde {csv_path}: {e}")
+			return None
+
+	df = df.copy()
+
+	# Detectar columna de fecha/hora (reusar heurística)
+	fallback_cols = [
+		"publish_time",
+		"publish_date",
+		"publishTimestamp",
+		"publishedAt",
+		"upload_time",
+		"uploaded_at",
+		"fecha_publicacion",
+		"fecha_publicación",
+		"fecha",
+		"published_at",
+	]
+	found = None
+	for c in fallback_cols:
+		if c in df.columns:
+			found = c
+			break
+	if not found:
+		for c in df.columns:
+			if re.search(r'publish|upload|date|time|fecha|publica|publicación|publicacion', c, re.I):
+				found = c
+				break
+	if not found:
+		print("No se encontró una columna de fecha/hora para plot_videos_por_semana.")
+		return None
+
+	# Parsear fechas
+	try:
+		df[found] = pd.to_datetime(df[found], format='mixed', errors='coerce')
+	except Exception:
+		df[found] = pd.to_datetime(df[found].astype(str), format='mixed', errors='coerce')
+
+	df = df.dropna(subset=[found])
+	if df.empty:
+		print("No hay datos válidos con fechas para plot_videos_por_semana.")
+		return None
+
+	# Normalizar tz
+	try:
+		if pd.api.types.is_datetime64tz_dtype(df[found].dtype):
+			df[found] = df[found].dt.tz_convert('UTC').dt.tz_localize(None)
+	except Exception:
+		try:
+			df[found] = df[found].dt.tz_localize(None)
+		except Exception:
+			pass
+
+	# Parsear parámetros de fecha
+	try:
+		start_ts = pd.Timestamp(str(start_week))
+	except Exception:
+		print(f"start_week inválido: {start_week}")
+		return None
+
+	if end_week is None:
+		end_ts = pd.Timestamp.now()
+	else:
+		try:
+			end_ts = pd.Timestamp(str(end_week))
+		except Exception:
+			print(f"end_week inválido: {end_week}")
+			return None
+
+	if end_ts < start_ts:
+		print("end_week debe ser igual o posterior a start_week.")
+		return None
+
+	# Filtrar por rango (inclusivo)
+	mask = (df[found] >= start_ts) & (df[found] <= end_ts)
+	df = df[mask]
+
+	# Construir intervalos: primer intervalo desde start_ts hasta el primer domingo
+	period_starts = []
+	period_ends = []
+	cur_start = start_ts.normalize()
+	first_sunday = cur_start + pd.Timedelta(days=(6 - cur_start.weekday()))
+	if first_sunday > end_ts:
+		first_sunday = end_ts
+	period_starts.append(cur_start)
+	period_ends.append(first_sunday)
+	cur_next = (first_sunday + pd.Timedelta(days=1)).normalize()
+
+	while cur_next <= end_ts.normalize():
+		cur_end = cur_next + pd.Timedelta(days=6)
+		if cur_end > end_ts:
+			cur_end = end_ts
+		period_starts.append(cur_next)
+		period_ends.append(cur_end)
+		cur_next = (cur_end + pd.Timedelta(days=1)).normalize()
+
+	# Contar por cada intervalo (inclusivo ambos extremos)
+	counts_list = []
+	for s, e in zip(period_starts, period_ends):
+		mask_i = (df[found] >= s) & (df[found] <= e)
+		counts_list.append(int(mask_i.sum()))
+
+	# Preparar índice y serie
+	idx = pd.to_datetime(period_starts)
+	vals = np.array(counts_list, dtype=int)
+
+	plt.figure(figsize=(12, 6))
+	sns.lineplot(x=idx, y=vals, marker='o', color='tab:blue')
+	plt.xlabel('Semana (inicio)')
+	plt.ylabel('Cantidad de videos publicados')
+	plt.title(f'Videos publicados por semana ({str(start_ts.date())} → {str(end_ts.date())})')
+
+	# Formato del eje x y delimitadores mensuales
+	ax = plt.gca()
+	ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+	ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+	plt.xticks(rotation=45)
+
+	# Dibujar líneas verticales en el inicio de cada mes dentro del rango
+	if len(idx) > 0:
+		month_starts = pd.date_range(start=idx.min().normalize(), end=idx.max().normalize(), freq='MS')
+		for ms in month_starts:
+			ax.axvline(ms, color='gray', linestyle='--', linewidth=0.8, alpha=0.6)
+
+	plt.tight_layout()
+
+	suffix = f"_{re.sub(r'\\W+', '_', str(file_suffix)).strip('_')}" if file_suffix else ""
+	out_file = script_dir / f"weekly_videos{suffix}.png"
+	if save:
+		plt.savefig(out_file, dpi=150)
+		print(f"Gráfico semanal guardado en {out_file}")
+
+	# Guardar TXT con WeekStart,Count
+	txt_file = script_dir / f"weekly_videos{suffix}.txt"
+	with open(txt_file, 'w', encoding='utf-8') as f:
+		f.write('WeekStart,Count\n')
+		for s, cnt in zip(period_starts, counts_list):
+			f.write(f"{str(s.date())},{int(cnt)}\n")
+	print(f"Conteos semanales guardados en {txt_file}")
+
+	if show:
+		plt.show()
+	plt.close()
+
+	res_df = pd.DataFrame({'week_start': [str(p.date()) for p in period_starts], 'count': vals})
+	return res_df
+
 # Conteo de videos por día de la semana (Lun-Dom)
-def analyze_weekday_distribution(df, root=None, output_dir=None, file_suffix=None, canal_filter=None, duracion_filter=None):
+def analyze_weekday_distribution(df, root=None, output_dir=None, file_suffix=None, canal_filter=None, duracion_filter=None, menos_de_1min=True):
 	"""
 	Cuenta la cantidad de videos publicados por día de la semana y guarda
 	un histograma PNG y un TXT con los conteos en `outputs/<script>/`.
@@ -743,7 +1064,10 @@ def analyze_weekday_distribution(df, root=None, output_dir=None, file_suffix=Non
 				(None, 60)    → videos de menos de 1 minuto
 				(3600, None)  → videos de más de 1 hora
 				(60, 3600)    → videos entre 1 min y 1 hora
-			Si es None no se filtra por duración.
+			Si es None se filtra por defecto por videos de menos de 1 minuto
+			(<= 60s). Para cambiar a filtrar videos de más de 1 minuto pase
+			`menos_de_1min=False`. Si se proporciona `duracion_filter`, este
+			parámetro es ignorado.
 
 	Returns:
 		Series con conteos por día de la semana (índices en español).
@@ -760,6 +1084,15 @@ def analyze_weekday_distribution(df, root=None, output_dir=None, file_suffix=Non
 		script_dir.mkdir(parents=True, exist_ok=True)
 
 	df = df.copy()
+
+	# Mapear el parámetro `menos_de_1min` a `duracion_filter` si no se
+	# proporcionó un filtro explícito. Esto mantiene compatibilidad con
+	# el uso previo de `duracion_filter`.
+	if duracion_filter is None:
+		if menos_de_1min:
+			duracion_filter = (None, 60)
+		else:
+			duracion_filter = (61, None)
 
 	# ------------------------------------------------------------------
 	# Función interna para parsear duraciones a segundos
@@ -1293,7 +1626,10 @@ def analyze_description_length(df, root=None, output_dir=None, file_suffix=None,
 				(None, 60)    → videos de menos de 1 minuto
 				(3600, None)  → videos de más de 1 hora
 				(60, 3600)    → videos entre 1 min y 1 hora
-			Si es None no se filtra por duración.
+			Si es None se filtra por defecto por videos de menos de 1 minuto
+			(<= 60s). Para cambiar a filtrar videos de más de 1 minuto pase
+			`menos_de_1min=False`. Si se proporciona `duracion_filter`, este
+			parámetro es ignorado.
 
 	Returns:
 		Series con conteos por intervalo de longitud de descripción.
@@ -5529,9 +5865,14 @@ def main() -> None:
 
 	# Generar gráfico de distribución por duración y guardarlo también en outputs/EDA
 	plot_duration_pie_buckets(df, output_dir=eda_dir)
-	
- 	# Generar gráfico de distribución por calidad/definición y guardarlo en outputs/EDA
+	# Generar gráfico de distribución por calidad/definición y guardarlo en outputs/EDA
 	plot_definicion_pie(df=df, output_dir=eda_dir)
+
+	# Generar gráfico de videos publicados por mes y guardarlo en outputs/EDA
+	plot_videos_por_mes(df=df, output_dir=eda_dir)
+
+	# Generar gráfico de videos publicados por semana desde enero 2026 hasta la actualidad
+	plot_videos_por_semana(df=df, start_week='2025-12-29', output_dir=eda_dir)
 
 	# Generar gráfico de distribución por categorías y guardarlo en outputs/EDA
 	plot_category_pie(df=df, output_dir=eda_dir)
@@ -5656,7 +5997,6 @@ def main() -> None:
 	os.makedirs(crecimiento_dir, exist_ok=True)
 
 	analyze_views_growth_by_age(df, output_dir=crecimiento_dir)
-
 
 if __name__ == '__main__':
 	main()
