@@ -4004,6 +4004,290 @@ def monte_carlo_weekdays(
 	print(f"{'='*60}\n")
 	return all_results
 
+# Simulación Monte Carlo por semanas y ponderación de victorias por día
+def monte_carlo_weekdays_weighted(
+	df: pd.DataFrame,
+	output_dir: str | None = None,
+	start_date: str = '2025-12-29',
+	n_rounds: int = 200_000,
+	seed: int = 42,
+	save: bool = True,
+	show: bool = False,
+) -> dict:
+	"""
+	Ejecuta Monte Carlo por semana desde `start_date` hasta la última fecha.
+
+	- Para cada semana (intervalo de 7 días desde `start_date`) ejecuta una
+	  simulación Monte Carlo equivalente a `monte_carlo_weekdays` usando sólo
+	  los datos de esa semana y guarda una imagen y un TXT en
+	  `outputs/Random/Simulación por semanas/`.
+	- Luego pondera los porcentajes de victorias de cada día usando como
+	  peso el número de videos totales por semana y genera una imagen final
+	  con los porcentajes ponderados.
+	- Además genera una imagen con la simulación Monte Carlo usando todos
+	  los datos desde `start_date` hasta la actualidad (un solo run sobre
+	  el conjunto agregado).
+
+	Retorna un dict con keys: 'weekly' (lista de tuples (week_start, results)),
+	'weighted' (final ponderado dict), 'all' (resultados del agregado).
+	"""
+
+	if output_dir is None:
+		root = Path(__file__).resolve().parents[1]
+		base_out = root / "outputs" / "Random"
+	else:
+		base_out = Path(output_dir)
+	base_out.mkdir(parents=True, exist_ok=True)
+
+	weeks_dir = base_out / "Simulación por semanas"
+	weeks_dir.mkdir(parents=True, exist_ok=True)
+
+	# Reusar heurística de columnas de monte_carlo_weekdays
+	date_candidates = [
+		"publishedAt", "published_at", "fecha_publicacion",
+		"fecha", "date", "upload_date",
+	]
+	date_col = None
+	for c in date_candidates:
+		if c in df.columns:
+			date_col = c
+			break
+	if date_col is None:
+		for c in df.columns:
+			if re.search(r'publish|upload|date|time|fecha|publica|publicación|publicacion', c, re.I):
+				date_col = c
+				break
+	if date_col is None:
+		print("monte_carlo_weekdays_weighted: No se encontró columna de fecha/hora.")
+		return {}
+
+	view_candidates = [
+		"viewCount", "views", "vistas", "visualizaciones",
+		"view_count", "reproducciones",
+	]
+	view_col = None
+	for c in view_candidates:
+		if c in df.columns:
+			view_col = c
+			break
+	if view_col is None:
+		for c in df.columns:
+			if re.search(r'view|vista|visual|reproduc', c, re.I):
+				view_col = c
+				break
+	if view_col is None:
+		print("monte_carlo_weekdays_weighted: No se encontró columna de vistas/viewCount.")
+		return {}
+
+	duration_candidates = [
+		"durationSeconds", "duracion_segundos", "duration_seconds",
+		"duration_sec", "length_seconds",
+	]
+	dur_col = None
+	for c in duration_candidates:
+		if c in df.columns:
+			dur_col = c
+			break
+	if dur_col is None:
+		for c in df.columns:
+			if re.search(r'duraci|duration|length', c, re.I):
+				dur_col = c
+				break
+	if dur_col is None:
+		print("monte_carlo_weekdays_weighted: No se encontró columna de duración.")
+		return {}
+
+	tmp = df[[date_col, view_col, dur_col]].copy()
+	try:
+		tmp[date_col] = pd.to_datetime(tmp[date_col], format='mixed', errors='coerce')
+	except Exception:
+		tmp[date_col] = pd.to_datetime(tmp[date_col].astype(str), format='mixed', errors='coerce')
+	tmp["views"] = pd.to_numeric(tmp[view_col], errors="coerce")
+	tmp["dur_s"] = pd.to_numeric(tmp[dur_col], errors="coerce")
+	tmp = tmp.dropna(subset=[date_col, "views", "dur_s"]).copy()
+	if tmp.empty:
+		print("monte_carlo_weekdays_weighted: No hay datos válidos con fechas, vistas y duración.")
+		return {}
+	tmp["views"] = tmp["views"].astype(int)
+	tmp["dur_s"] = tmp["dur_s"].astype(float)
+
+	# Filtrar desde start_date (alinear zonas horarias si es necesario)
+	try:
+		start_ts = pd.to_datetime(start_date)
+	except Exception:
+		start_ts = tmp[date_col].min()
+
+	# Detectar si la columna de fecha es tz-aware y alinear start_ts
+	col_tz = getattr(tmp[date_col].dt, 'tz', None)
+	if col_tz is not None:
+		if getattr(start_ts, 'tz', None) is None:
+			try:
+				start_ts = pd.to_datetime(start_date).tz_localize(col_tz)
+			except Exception:
+				start_ts = pd.to_datetime(start_date, utc=True).tz_convert(col_tz)
+	else:
+		if getattr(start_ts, 'tz', None) is not None:
+			# convertir a tz-naive
+			try:
+				start_ts = start_ts.tz_convert(None)
+			except Exception:
+				start_ts = start_ts.tz_localize(None)
+
+	tmp = tmp[tmp[date_col] >= start_ts].copy()
+	if tmp.empty:
+		print(f"monte_carlo_weekdays_weighted: No hay datos desde {start_date} en adelante.")
+		return {}
+
+	# Rangos semanales: definir boundaries desde start_date en bloques de 7 días
+	last_date = tmp[date_col].max()
+	week_starts = pd.date_range(start=start_ts.normalize(), end=last_date.normalize(), freq='7D')
+	if len(week_starts) == 0:
+		week_starts = pd.DatetimeIndex([start_ts.normalize()])
+
+	weekday_labels = ['lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado', 'domingo']
+
+	rng = np.random.default_rng(seed)
+
+	weekly_results = []
+	weighted_sum = {d: 0.0 for d in weekday_labels}
+	total_weight = 0
+
+	def _plot_and_save(res: dict, title: str, fname: str, folder: Path):
+		if not res:
+			return
+		lbls = list(res.keys())
+		pcts = [res[l] for l in lbls]
+		fig, ax = plt.subplots(figsize=(10,5))
+		bars = ax.bar(range(len(lbls)), pcts, color=sns.color_palette("viridis", len(lbls)), edgecolor='black')
+		ax.set_xticks(range(len(lbls)))
+		ax.set_xticklabels(lbls, rotation=30, ha='right')
+		ax.set_ylabel('% de victorias')
+		ax.set_title(title)
+		for bar, pct in zip(bars, pcts):
+			ax.text(bar.get_x() + bar.get_width()/2, bar.get_height()+0.3, f"{pct:.2f}%", ha='center', va='bottom')
+		plt.tight_layout()
+		if save:
+			out = folder / f"{fname}.png"
+			fig.savefig(out, dpi=150)
+			print(f"Imagen guardada: {out}")
+		if show:
+			plt.show()
+		plt.close(fig)
+
+	def _save_txt(res: dict, counts: dict, fname: str, folder: Path, rounds: int):
+		txt_path = folder / f"{fname}.txt"
+		with open(txt_path, 'w', encoding='utf-8') as f:
+			f.write(f"Monte Carlo – Días de la semana ({fname})\n")
+			f.write(f"Rondas: {rounds:,}\n\n")
+			f.write(f"{'Día':<18}{'Count':>8}{'Victorias':>12}{'%':>10}\n")
+			f.write('-'*48 + '\n')
+			for label, pct in res.items():
+				wins_count = int(round(pct/100 * rounds))
+				count_val = counts.get(label, 0)
+				f.write(f"{label:<18}{count_val:>8,}{wins_count:>12,}{pct:>9.2f}%\n")
+		print(f"Datos guardados: {txt_path}")
+
+	# Definir buckets a usar tal cual monte_carlo_weekdays
+	duration_buckets = [
+		("le1min",  lambda s: s <= 60,               "≤1min"),
+		("3_16min", lambda s: (s > 180) & (s <= 960), "3-16min"),
+	]
+
+	# Procesar cada semana
+	for week_start in week_starts:
+		week_end = week_start + pd.Timedelta(days=7)
+		week_df = tmp[(tmp[date_col] >= week_start) & (tmp[date_col] < week_end)].copy()
+		if week_df.empty:
+			continue
+		week_label = week_start.strftime('%Y-%m-%d')
+		print(f"Procesando semana: {week_label} ({len(week_df)} videos)")
+
+		# Para cada bucket de duración hacemos la simulación (similar a monte_carlo_weekdays)
+		for bucket_name, bucket_cond, bucket_label in duration_buckets:
+			wdf = week_df[bucket_cond(week_df['dur_s'])].copy()
+			if wdf.empty:
+				continue
+
+			# Agrupar por weekday
+			weekday_videos = {}
+			for idx, label in enumerate(weekday_labels):
+				arr = wdf.loc[wdf[date_col].dt.dayofweek == idx, 'views'].values
+				if len(arr) > 0:
+					weekday_videos[label] = arr
+
+			if len(weekday_videos) < 2:
+				# no se puede simular con menos de 2 días con datos
+				continue
+
+			labels = list(weekday_videos.keys())
+			arrays = [weekday_videos[l] for l in labels]
+			n_days = len(labels)
+
+			# Simulación vectorizada
+			idx_matrix = [rng.integers(0, len(arr), size=n_rounds) for arr in arrays]
+			views_matrix = np.column_stack([arr[idx] for arr, idx in zip(arrays, idx_matrix)])
+			winners = np.argmax(views_matrix, axis=1)
+			wins = np.array([np.sum(winners == i) for i in range(n_days)], dtype=np.int64)
+			win_pct = wins / n_rounds * 100
+			results = {labels[i]: float(win_pct[i]) for i in range(n_days)}
+			counts = {label: len(arr) for label, arr in weekday_videos.items()}
+
+			# Guardar imagen y txt por semana y bucket
+			fname = f"monte_carlo_week_{week_label}_{bucket_name}"
+			_plot_and_save(results, f"Monte Carlo – {bucket_label} – semana {week_label}\n{n_rounds:,} rondas", fname, weeks_dir)
+			_save_txt(results, counts, fname, weeks_dir, n_rounds)
+
+			# Acumular para ponderación: peso = total videos en la semana
+			week_weight = int(wdf.shape[0])
+			for d in weekday_labels:
+				weighted_sum[d] += results.get(d, 0.0) * week_weight
+			total_weight += week_weight
+
+			weekly_results.append((week_label + '_' + bucket_name, results, counts, week_weight))
+
+	# Generar gráfico ponderado final
+	weighted_result = {}
+	if total_weight > 0:
+		for d in weekday_labels:
+			weighted_result[d] = float(weighted_sum[d] / total_weight)
+		_plot_and_save(weighted_result, f"Monte Carlo – Victorias ponderadas por semana desde {start_ts.date()}", f"monte_carlo_weekdays_weighted_from_{start_ts.date()}", weeks_dir)
+		_save_txt(weighted_result, {}, f"monte_carlo_weekdays_weighted_from_{start_ts.date()}", weeks_dir, n_rounds)
+
+	# Además, ejecutar Monte Carlo sobre todo el rango desde start_date (datos agregados)
+	print("Ejecutando simulación agregada sobre todo el periodo...")
+	all_results = {}
+	tmp_filtered_all = tmp.copy()
+	for bucket_name, bucket_cond, bucket_label in duration_buckets:
+		sub = tmp_filtered_all[bucket_cond(tmp_filtered_all['dur_s'])].copy()
+		if sub.empty:
+			continue
+		weekday_videos = {}
+		for idx, label in enumerate(weekday_labels):
+			arr = sub.loc[sub[date_col].dt.dayofweek == idx, 'views'].values
+			if len(arr) > 0:
+				weekday_videos[label] = arr
+		if len(weekday_videos) < 2:
+			continue
+		labels = list(weekday_videos.keys())
+		arrays = [weekday_videos[l] for l in labels]
+		idx_matrix = [rng.integers(0, len(arr), size=n_rounds) for arr in arrays]
+		views_matrix = np.column_stack([arr[idx] for arr, idx in zip(arrays, idx_matrix)])
+		winners = np.argmax(views_matrix, axis=1)
+		wins = np.array([np.sum(winners == i) for i in range(len(arrays))], dtype=np.int64)
+		win_pct = wins / n_rounds * 100
+		results = {labels[i]: float(win_pct[i]) for i in range(len(labels))}
+		counts = {label: len(arr) for label, arr in weekday_videos.items()}
+		fname = f"monte_carlo_weekdays_all_from_{start_ts.date()}_{bucket_name}"
+		_plot_and_save(results, f"Monte Carlo agregado – {bucket_label} desde {start_ts.date()}\n{n_rounds:,} rondas", fname, weeks_dir)
+		_save_txt(results, counts, fname, weeks_dir, n_rounds)
+		all_results[bucket_name] = results
+
+	return {
+		'weekly': weekly_results,
+		'weighted': weighted_result,
+		'all': all_results,
+	}
+
 # Simulación Monte Carlo por número de palabras en el título
 def monte_carlo_title_words(
 	df: pd.DataFrame,
@@ -6125,6 +6409,8 @@ def main() -> None:
 
 	monte_carlo_duration_intervals(df, output_dir=random_dir)
 	monte_carlo_weekdays(df, output_dir=random_dir)
+	# Llamada a la nueva función que ejecuta Monte Carlo por semanas y pondera resultados
+	monte_carlo_weekdays_weighted(df, output_dir=random_dir, start_date='2025-12-29', n_rounds=200_000)
 	monte_carlo_title_words(df, output_dir=random_dir)
 	monte_carlo_tag_count(df, output_dir=random_dir)
 	monte_carlo_description_length(df, output_dir=random_dir)
