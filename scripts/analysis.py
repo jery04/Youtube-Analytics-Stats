@@ -4013,6 +4013,7 @@ def monte_carlo_weekdays_weighted(
 	seed: int = 42,
 	save: bool = True,
 	show: bool = False,
+	per_bucket_subfolders: bool = True,
 ) -> dict:
 	"""
 	Ejecuta Monte Carlo por semana desde `start_date` hasta la última fecha.
@@ -4193,6 +4194,12 @@ def monte_carlo_weekdays_weighted(
 		("3_16min", lambda s: (s > 180) & (s <= 960), "3-16min"),
 	]
 
+	# Crear subcarpetas por bucket si se pidió
+	subfolder_map = {
+		'le1min': 'menos_1min',
+		'3_16min': '3_16min',
+	}
+
 	# Procesar cada semana
 	for week_start in week_starts:
 		week_end = week_start + pd.Timedelta(days=7)
@@ -4232,10 +4239,17 @@ def monte_carlo_weekdays_weighted(
 			results = {labels[i]: float(win_pct[i]) for i in range(n_days)}
 			counts = {label: len(arr) for label, arr in weekday_videos.items()}
 
-			# Guardar imagen y txt por semana y bucket
+			# Guardar imagen y txt por semana y bucket (posible subcarpeta)
 			fname = f"monte_carlo_week_{week_label}_{bucket_name}"
-			_plot_and_save(results, f"Monte Carlo – {bucket_label} – semana {week_label}\n{n_rounds:,} rondas", fname, weeks_dir)
-			_save_txt(results, counts, fname, weeks_dir, n_rounds)
+			target_folder = weeks_dir
+			if per_bucket_subfolders:
+				sub = subfolder_map.get(bucket_name)
+				if sub:
+					target_folder = weeks_dir / sub
+					target_folder.mkdir(parents=True, exist_ok=True)
+
+			_plot_and_save(results, f"Monte Carlo – {bucket_label} – semana {week_label}\n{n_rounds:,} rondas", fname, target_folder)
+			_save_txt(results, counts, fname, target_folder, n_rounds)
 
 			# Acumular para ponderación: peso = total videos en la semana
 			week_weight = int(wdf.shape[0])
