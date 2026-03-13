@@ -724,7 +724,7 @@ def analyze_yearly_percentage(df, root=None, output_dir=None, file_suffix=None):
 	return ser
 
 # Grafico poligonal: cantidad de videos publicados por mes
-def plot_videos_por_mes(df=None, csv_path=None, start_month='2025-01', end_month=None, root=None, output_dir=None, file_suffix=None, save=True, show=False):
+def plot_videos_por_mes(df=None, csv_path=None, start_month='2025-01', end_month=None, root=None, output_dir=None, file_suffix=None, duracion_filter=None, save=True, show=False):
 	"""
 	Genera una línea poligonal con la cantidad de videos publicados por mes
 	entre `start_month` y `end_month` (ambos inclusivos). Formato de meses: 'YYYY-MM'.
@@ -752,6 +752,98 @@ def plot_videos_por_mes(df=None, csv_path=None, start_month='2025-01', end_month
 			return None
 
 	df = df.copy()
+
+	# Si no se proporcionó `duracion_filter`, filtramos por defecto videos <= 60s
+	if duracion_filter is None:
+		duracion_filter = (None, 60)
+
+	# Detectar columna de duración y parsear a segundos (si existe)
+	duration_cols = [
+		"duration",
+		"duracion",
+		"duracion_iso",
+		"duracion_segundos",
+		"duracion_legible",
+		"video_duration",
+		"length",
+		"duration_sec",
+		"length_seconds",
+		"duration_seconds",
+		"duration_ms",
+	]
+	dur_col = None
+	for c in duration_cols:
+		if c in df.columns:
+			dur_col = c
+			break
+	if not dur_col:
+		for c in df.columns:
+			if re.search(r'duraci|duration|length|time_length', c, re.I):
+				dur_col = c
+				break
+
+	def _to_seconds(x):
+		if pd.isna(x):
+			return None
+		if isinstance(x, (int, float)) and not isinstance(x, bool):
+			try:
+				val = float(x)
+				if val > 1e6:
+					return int(val / 1000)
+				return int(val)
+			except Exception:
+				return None
+		s = str(x).strip()
+		m_iso = re.match(r'^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$', s)
+		if m_iso:
+			h = int(m_iso.group(1) or 0)
+			m = int(m_iso.group(2) or 0)
+			ss = int(m_iso.group(3) or 0)
+			return h * 3600 + m * 60 + ss
+		if ':' in s:
+			parts = [p.strip() for p in s.split(':') if p.strip()!='']
+			try:
+				if len(parts) == 3:
+					return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(float(parts[2]))
+				if len(parts) == 2:
+					return int(parts[0]) * 60 + int(float(parts[1]))
+			except Exception:
+				pass
+		m_hms = re.search(r'(\d+)\s*h', s, re.I)
+		m_min = re.search(r'(\d+)\s*m', s, re.I)
+		m_sec = re.search(r'(\d+)\s*s', s, re.I)
+		if m_hms or m_min or m_sec:
+			return (int(m_hms.group(1)) if m_hms else 0) * 3600 + (int(m_min.group(1)) if m_min else 0) * 60 + (int(m_sec.group(1)) if m_sec else 0)
+		m_digits = re.search(r'^(\d+(?:\.\d+)?)$', s)
+		if m_digits:
+			try:
+				return int(float(m_digits.group(1)))
+			except Exception:
+				return None
+		return None
+
+	if dur_col is not None:
+		seconds_cols = {"duracion_segundos", "duration_seconds", "duration_sec", "length_seconds"}
+		if dur_col in seconds_cols:
+			df['__duration_s'] = pd.to_numeric(df[dur_col], errors='coerce')
+			if df['__duration_s'].notna().any():
+				maxv = df['__duration_s'].max()
+				if pd.notna(maxv) and maxv > 1e6:
+					df['__duration_s'] = (df['__duration_s'] / 1000.0).astype(float)
+		else:
+			df['__duration_s'] = df[dur_col].apply(_to_seconds)
+
+	# Aplicar filtro de duración si se pudo parsear
+	if '__duration_s' in df.columns:
+		df = df.dropna(subset=['__duration_s'])
+		min_seg, max_seg = duracion_filter
+		if min_seg is not None:
+			df = df[df['__duration_s'] >= float(min_seg)]
+		if max_seg is not None:
+			df = df[df['__duration_s'] <= float(max_seg)]
+	else:
+		# Si no hay columna de duración, no aplicamos filtro pero avisamos
+		print("No se encontró columna de duración; no se aplicará filtro de duración para plot_videos_por_mes.")
 
 	# Detectar columna de fecha/hora (heurístico ya usado en el módulo)
 	fallback_cols = [
@@ -869,7 +961,7 @@ def plot_videos_por_mes(df=None, csv_path=None, start_month='2025-01', end_month
 	return res_df
 
 # Grafico poligonal: cantidad de videos publicados por semana
-def plot_videos_por_semana(df=None, csv_path=None, start_week='2026-01-01', end_week=None, root=None, output_dir=None, file_suffix=None, save=True, show=False):
+def plot_videos_por_semana(df=None, csv_path=None, start_week='2026-01-01', end_week=None, root=None, output_dir=None, file_suffix=None, duracion_filter=None, save=True, show=False):
 	"""
 	Genera una línea poligonal con la cantidad de videos publicados por semana
 	entre `start_week` y `end_week` (ambos inclusivos). `start_week` es la fecha
@@ -900,6 +992,97 @@ def plot_videos_por_semana(df=None, csv_path=None, start_week='2026-01-01', end_
 			return None
 
 	df = df.copy()
+
+	# Si no se proporcionó `duracion_filter`, filtramos por defecto videos <= 60s
+	if duracion_filter is None:
+		duracion_filter = (None, 60)
+
+	# Detectar columna de duración y parsear a segundos (si existe)
+	duration_cols = [
+		"duration",
+		"duracion",
+		"duracion_iso",
+		"duracion_segundos",
+		"duracion_legible",
+		"video_duration",
+		"length",
+		"duration_sec",
+		"length_seconds",
+		"duration_seconds",
+		"duration_ms",
+	]
+	dur_col = None
+	for c in duration_cols:
+		if c in df.columns:
+			dur_col = c
+			break
+	if not dur_col:
+		for c in df.columns:
+			if re.search(r'duraci|duration|length|time_length', c, re.I):
+				dur_col = c
+				break
+
+	def _to_seconds(x):
+		if pd.isna(x):
+			return None
+		if isinstance(x, (int, float)) and not isinstance(x, bool):
+			try:
+				val = float(x)
+				if val > 1e6:
+					return int(val / 1000)
+				return int(val)
+			except Exception:
+				return None
+		s = str(x).strip()
+		m_iso = re.match(r'^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$', s)
+		if m_iso:
+			h = int(m_iso.group(1) or 0)
+			m = int(m_iso.group(2) or 0)
+			ss = int(m_iso.group(3) or 0)
+			return h * 3600 + m * 60 + ss
+		if ':' in s:
+			parts = [p.strip() for p in s.split(':') if p.strip()!='']
+			try:
+				if len(parts) == 3:
+					return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(float(parts[2]))
+				if len(parts) == 2:
+					return int(parts[0]) * 60 + int(float(parts[1]))
+			except Exception:
+				pass
+		m_hms = re.search(r'(\d+)\s*h', s, re.I)
+		m_min = re.search(r'(\d+)\s*m', s, re.I)
+		m_sec = re.search(r'(\d+)\s*s', s, re.I)
+		if m_hms or m_min or m_sec:
+			return (int(m_hms.group(1)) if m_hms else 0) * 3600 + (int(m_min.group(1)) if m_min else 0) * 60 + (int(m_sec.group(1)) if m_sec else 0)
+		m_digits = re.search(r'^(\d+(?:\.\d+)?)$', s)
+		if m_digits:
+			try:
+				return int(float(m_digits.group(1)))
+			except Exception:
+				return None
+		return None
+
+	if dur_col is not None:
+		seconds_cols = {"duracion_segundos", "duration_seconds", "duration_sec", "length_seconds"}
+		if dur_col in seconds_cols:
+			df['__duration_s'] = pd.to_numeric(df[dur_col], errors='coerce')
+			if df['__duration_s'].notna().any():
+				maxv = df['__duration_s'].max()
+				if pd.notna(maxv) and maxv > 1e6:
+					df['__duration_s'] = (df['__duration_s'] / 1000.0).astype(float)
+		else:
+			df['__duration_s'] = df[dur_col].apply(_to_seconds)
+
+	# Aplicar filtro de duración si se pudo parsear
+	if '__duration_s' in df.columns:
+		df = df.dropna(subset=['__duration_s'])
+		min_seg, max_seg = duracion_filter
+		if min_seg is not None:
+			df = df[df['__duration_s'] >= float(min_seg)]
+		if max_seg is not None:
+			df = df[df['__duration_s'] <= float(max_seg)]
+	else:
+		print("No se encontró columna de duración; no se aplicará filtro de duración para plot_videos_por_semana.")
 
 	# Detectar columna de fecha/hora (reusar heurística)
 	fallback_cols = [
@@ -1044,7 +1227,7 @@ def plot_videos_por_semana(df=None, csv_path=None, start_week='2026-01-01', end_
 	return res_df
 
 # Conteo de videos por día de la semana (Lun-Dom)
-def analyze_weekday_distribution(df, root=None, output_dir=None, file_suffix=None, canal_filter=None, duracion_filter=None, menos_de_1min=True):
+def analyze_weekday_distribution(df, root=None, output_dir=None, file_suffix=None, canal_filter=None, duracion_filter=None):
 	"""
 	Cuenta la cantidad de videos publicados por día de la semana y guarda
 	un histograma PNG y un TXT con los conteos en `outputs/<script>/`.
@@ -1064,10 +1247,9 @@ def analyze_weekday_distribution(df, root=None, output_dir=None, file_suffix=Non
 				(None, 60)    → videos de menos de 1 minuto
 				(3600, None)  → videos de más de 1 hora
 				(60, 3600)    → videos entre 1 min y 1 hora
-			Si es None se filtra por defecto por videos de menos de 1 minuto
-			(<= 60s). Para cambiar a filtrar videos de más de 1 minuto pase
-			`menos_de_1min=False`. Si se proporciona `duracion_filter`, este
-			parámetro es ignorado.
+			Si es None, por compatibilidad, se aplicará por defecto
+			`duracion_filter=(None, 60)` (videos de <= 60s). Si se
+			proporciona `duracion_filter`, éste tiene prioridad.
 
 	Returns:
 		Series con conteos por día de la semana (índices en español).
@@ -1085,14 +1267,11 @@ def analyze_weekday_distribution(df, root=None, output_dir=None, file_suffix=Non
 
 	df = df.copy()
 
-	# Mapear el parámetro `menos_de_1min` a `duracion_filter` si no se
-	# proporcionó un filtro explícito. Esto mantiene compatibilidad con
-	# el uso previo de `duracion_filter`.
+	# Si no se proporcionó `duracion_filter`, aplicamos por defecto
+	# videos de <= 60s para mantener compatibilidad con el comportamiento
+	# anterior donde `menos_de_1min=True` era el valor por defecto.
 	if duracion_filter is None:
-		if menos_de_1min:
-			duracion_filter = (None, 60)
-		else:
-			duracion_filter = (61, None)
+		duracion_filter = (None, 60)
 
 	# ------------------------------------------------------------------
 	# Función interna para parsear duraciones a segundos
@@ -5868,11 +6047,11 @@ def main() -> None:
 	# Generar gráfico de distribución por calidad/definición y guardarlo en outputs/EDA
 	plot_definicion_pie(df=df, output_dir=eda_dir)
 
-	# Generar gráfico de videos publicados por mes y guardarlo en outputs/EDA
-	plot_videos_por_mes(df=df, output_dir=eda_dir)
+	# Generar gráfico de videos publicados por mes (menos de 1 min) y guardarlo en outputs/EDA
+	plot_videos_por_mes(df=df, output_dir=eda_dir, duracion_filter=(None, 60))
 
-	# Generar gráfico de videos publicados por semana desde enero 2026 hasta la actualidad
-	plot_videos_por_semana(df=df, start_week='2025-12-29', output_dir=eda_dir)
+	# Generar gráfico de videos publicados por semana desde enero 2026 hasta la actualidad (menos de 1 min)
+	plot_videos_por_semana(df=df, start_week='2025-12-29', output_dir=eda_dir, duracion_filter=(None, 60))
 
 	# Generar gráfico de distribución por categorías y guardarlo en outputs/EDA
 	plot_category_pie(df=df, output_dir=eda_dir)
