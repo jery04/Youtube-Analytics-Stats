@@ -1,69 +1,51 @@
-# YouTube Entretenimiento — Análisis técnico y resultados 📊🎬🧠
 
-Descripción técnica breve
--------------------------
-Proyecto de análisis cuantitativo y simulación sobre un corpus de canales y vídeos de YouTube centrado en entretenimiento. El objetivo es caracterizar propiedades temporales, de duración, tags, títulos y métricas de viralidad mediante estadística descriptiva, análisis temporal y simulaciones Monte Carlo. El repositorio contiene el conjunto de datos crudo, scripts ETL/análisis y una colección abundante de resultados en texto para reproducibilidad y auditoría. 🧾🔬⚙️
+# YouTube Entertainment — Technical analysis and results 📊🎬🧠
 
-Objetivos principales 🎯
-- **Characterizar** distribución de duraciones y horarios de publicación.
-- **Medir** señales de viralidad (ratio, crecimiento por edad del vídeo).
-- **Simular** comportamientos aleatorios vs observados (Monte Carlo) para validar hallazgos.
-- **Proveer** artefactos reproducibles (archivos de salida, scripts, datasets).
+Brief technical description
+---------------------------
+This repository contains a quantitative analysis and simulation project focused on a corpus of YouTube channels and videos in the entertainment genre. The goal is to characterize temporal properties, durations, tags, titles, and virality metrics using descriptive statistics, time-based analysis, and Monte Carlo simulations. The repository includes the raw dataset, ETL/analysis scripts, and an extensive collection of text-based results for reproducibility and auditing. 🧾🔬⚙️
 
-Estructura y flujo de datos (arquitectura) 🔁
-1. Ingesta: `dataset/videos.csv` y los CSV por canal en `dataset/channels/` contienen la metadata de los vídeos (identificador, título, descripción, duración, fecha de publicación, vistas y campos asociados). 💾
-2. ETL / Descarga: `scripts/download_channels.py` gestiona la adquisición / refresco de datos de canales. 🌐
-3. Orquestación: `scripts/index.py` / `scripts/program.py` sirven como puntos de entrada para ejecutar pipelines completos (descarga → limpieza → análisis). 🛠️
-4. Análisis: `scripts/analysis.py` y `scripts/channel_analysis.py` realizan agregaciones, cálculos estadísticos y generan ficheros de resultados en `outputs/`. 📈
-5. Salidas: `outputs/` contiene carpetas temáticas (EDA, Distribución, Viralidad, Monte Carlo, etc.) con .txt que resumen métricas y distribuciones. 📁
+Main objectives 🎯
+- **Characterize** the distribution of video durations and publishing times.
+- **Measure** signals of virality (virality ratio, growth by video age).
+- **Simulate** random vs observed behavior (Monte Carlo) to validate findings.
+- **Provide** reproducible artifacts (output files, scripts, datasets).
 
-Contenido destacable del repositorio 📂✨
-- `dataset/` — datos fuentes y backups (`videos.csv`, `state.json`, `channels/*.csv`).
-- `scripts/` — scripts de ingestión y análisis: [scripts/analysis.py](scripts/analysis.py), [scripts/channel_analysis.py](scripts/channel_analysis.py), [scripts/download_channels.py](scripts/download_channels.py), [scripts/index.py](scripts/index.py), [scripts/program.py](scripts/program.py).
-- `outputs/` — resultados derivados organizados por tema (EDA, Random/MonteCarlo, Viralidad, Distribución min, Weekdays, Crecimiento, etc.). Ejemplos: [outputs/Viralidad/virality_ratio.txt](outputs/Viralidad/virality_ratio.txt), [outputs/Crecimiento/views_growth_by_age.txt](outputs/Crecimiento/views_growth_by_age.txt).
-- `API YOUTUBE (LofiAPI).txt` — notas / configuración relacionada con la API usada (si aplica). 🧾
+Data structure and workflow (architecture) 🔁
+1. Ingestion: `dataset/videos.csv` and per-channel CSVs in `dataset/channels/` contain video metadata (id, title, description, duration, publish date, views, and related fields). 💾
+2. ETL / Download: `scripts/download_channels.py` handles acquisition and refresh of channel data. 🌐
+3. Orchestration: `scripts/index.py` and `scripts/program.py` act as entry points to run full pipelines (download → clean → analyze). 🛠️
+4. Analysis: `scripts/analysis.py` and `scripts/channel_analysis.py` perform aggregations, statistical calculations, and generate result files in `outputs/`. 📈
+5. Outputs: `outputs/` contains thematic folders (EDA, Distribution, Virality, Monte Carlo, etc.) with .txt files summarizing metrics and distributions. 📁
 
-Descripción técnica de los análisis principales 🧠🔎
-- Distribuciones de duración: se calculan histogramas y bucketizaciones en segundos/minutos para comparar subpoblaciones (p.ej. `menos_1min/` vs `3_16min/`). Resultados almacenados en `outputs/Distribucion min/` y `outputs/Duration/`. ⏱️
-- Horarios y días de la semana: agregaciones por hora/ventana de 2h y por weekday para identificar ventanas de publicación con mayor densidad y correlación con vistas. Resultados en `outputs/Weekdays/` y `outputs/Análisis del día/`. 🕒📅
-- Monte Carlo: para cada métrica (longitud de título, número de tags, descripción, distribución horaria) se ejecutan simulaciones aleatorias que generan distribuciones nulas; los archivos `monte_carlo_*.txt` contienen percentiles y p-values aproximados para evaluar si los observados se desvían de la aleatoriedad. 🧪🎲
-- Viralidad y crecimiento: `virality_ratio.txt` y `views_growth_by_age.txt` resumen métricas que combinan vistas, edad del vídeo y crecimiento temporal para identificar outliers de rápido crecimiento y patrones replicables. 📈🔥
+Notable repository contents 📂✨
+- `dataset/` — source data and backups (`videos.csv`, `state.json`, `channels/*.csv`).
+- `scripts/` — ingestion and analysis scripts: [scripts/analysis.py](scripts/analysis.py), [scripts/channel_analysis.py](scripts/channel_analysis.py), [scripts/download_channels.py](scripts/download_channels.py), [scripts/index.py](scripts/index.py), [scripts/program.py](scripts/program.py).
+- `outputs/` — derived results organized by topic (EDA, Random/MonteCarlo, Virality, Duration Distribution, Weekdays, Growth, etc.). Examples: [outputs/Viralidad/virality_ratio.txt](outputs/Viralidad/virality_ratio.txt), [outputs/Crecimiento/views_growth_by_age.txt](outputs/Crecimiento/views_growth_by_age.txt).
+- `API YOUTUBE (LofiAPI).txt` — notes / configuration related to the API used (if applicable). 🧾
 
-Formato y convenciones de los artefactos
-- Ficheros de salida son texto plano con columnas o series resumidas; nombre de archivo sigue la convención `{tema}/{indicador}.txt`.
-- Backups de datasets mantienen timestamps en el sufijo (p.ej. `videos.csv.bak_20260313_014547`). 🕊️
+Technical description of the main analyses 🧠🔎
+- Duration distributions: histograms and bucketizations in seconds/minutes are used to compare subpopulations (e.g. `menos_1min/` vs `3_16min/`). Results are stored in `outputs/Distribucion min/` and `outputs/Duration/`. ⏱️
+- Publishing times and weekdays: aggregations by hour / 2-hour windows and by weekday identify publishing windows with higher density and potential correlations with views. Results are in `outputs/Weekdays/` and `outputs/Análisis del día/`. 🕒📅
+- Monte Carlo: for each metric (title length, tag count, description length, hourly distribution) random simulations generate null distributions; `monte_carlo_*.txt` files contain percentiles and approximate p-values to assess whether observed values deviate from randomness. 🧪🎲
+- Virality and growth: `virality_ratio.txt` and `views_growth_by_age.txt` summarize metrics that combine views, video age and temporal growth to identify fast-growing outliers and replicable patterns. 📈🔥
 
-Interpretación práctica de resultados (cómo leerlos) 🧭
-- Archivos `*_histogram_*.txt` contienen bins y conteos; comparar percentiles para entender dispersión.
-- `monte_carlo_*` presentan intervalo de confianza empírico: si la métrica observada cae fuera del intervalo 95% de la simulación, es estadísticamente notable. ✨
-- `virality_ratio.txt` proporciona un indicador normalizado (por edad/vistas esperadas); valores altos marcan candidatos para estudio manual. 🔍
+Format and conventions of artifacts
+- Output files are plain text with columns or summarized series; filenames follow the convention `{topic}/{indicator}.txt`.
+- Dataset backups include timestamps in the suffix (e.g. `videos.csv.bak_20260313_014547`). 🕊️
 
-Cómo reproducir (entorno mínimo) 🧰
-Recomendado: Python 3.10+ en entorno virtual. Ejemplo rápido:
+Practical interpretation of results (how to read them) 🧭
+- `*_histogram_*.txt` files contain bins and counts; compare percentiles to understand dispersion.
+- `monte_carlo_*` files present empirical confidence intervals: if the observed metric falls outside the 95% simulation interval, it is statistically notable. ✨
+- `virality_ratio.txt` provides a normalized indicator (by age / expected views); high values flag candidates for manual inspection. 🔍
+
+How to reproduce (minimum environment) 🧰
+Recommended: Python 3.10+ in a virtual environment. Quick example:
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate    # Linux/macOS
 .venv\Scripts\Activate.ps1  # Windows PowerShell
-pip install -r requirements.txt  # si existe, o instalar pandas, numpy, matplotlib
-python scripts/index.py       # ejecutar pipeline principal (según configuración)
+pip install -r requirements.txt  # if present, or install pandas, numpy, matplotlib
+python scripts/index.py       # run the main pipeline (depending on configuration)
 ```
-
-Buenas prácticas y notas para desarrollo 🛡️
-- Versionar `dataset/videos.csv` solo para snapshots; preferir backups con timestamp.
-- Mantener `state.json` como registro de estado del pipeline (última ejecución, offsets, fallos recuperables).
-- Añadir `requirements.txt` si se incorporan dependencias explícitas. 📦
-
-Limitaciones conocidas ⚠️
-- Calidad y completitud de la metadata dependen de la fuente (API/CSV manual). Algunos campos pueden faltar o estar inconsistentes.
-- Las simulaciones Monte Carlo asumen independencias específicas; validar hipótesis antes de generalizar conclusiones. 🧾
-
-Siguientes pasos sugeridos 🛠️➡️
-- Automatizar CI para regenerar `outputs/` con cada push (reproducibilidad).
-- Serializar resultados clave a formatos estructurados (JSON/Parquet) para análisis posteriores.
-- Implementar notebooks de exploración reproducible (Jupyter) con visualizaciones interactivas. 📊
-
-Contacto y mantenimiento
-- Autor / Mantainer: revisar metadatos del repositorio o contactar al responsable del proyecto.
-
-¡Listo! Este README sintetiza la arquitectura, artefactos y resultados del proyecto. 🚀🔧📚
